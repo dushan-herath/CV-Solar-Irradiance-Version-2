@@ -167,7 +167,7 @@ if __name__ == "__main__":
 
     # Initialize the multimodal forecasting model
     sky_encoder = ImageEncoder(
-        model_name="resnet18", # swin_tiny_patch4_window7_224, convnextv2_tiny.fcmae_ft_in1k ,efficientnet_b0, regnety_004, convnextv2_tiny, efficientnet_b2
+        model_name="vmamba_tiny", # swin_tiny_patch4_window7_224, convnextv2_tiny.fcmae_ft_in1k ,efficientnet_b0, regnety_004, convnextv2_tiny, efficientnet_b2
         pretrained=True,
         freeze=False,
     )
