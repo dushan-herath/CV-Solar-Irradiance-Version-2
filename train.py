@@ -1,0 +1,256 @@
+import os
+import torch
+import json
+import numpy as np
+from torch.utils.data import DataLoader
+from torch import nn
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+from dataset import IrradianceForecastDataset
+from model import ImageEncoder, MultimodalForecaster
+
+
+def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
+    # Runs one full training pass over the dataset
+    model.train()
+    total_loss = 0.0
+    loop = tqdm(loader, total=len(loader), desc="Training", leave=True)
+
+    for i, (sky_seq, ts_seq, targets, *_) in enumerate(loop):
+        sky_seq = sky_seq.to(device)
+        ts_seq = ts_seq.to(device)
+        targets = targets.to(device)
+
+        optimizer.zero_grad()
+
+        # Mixed precision forward pass
+        with torch.cuda.amp.autocast():
+            preds = model(sky_seq, ts_seq)
+            loss = criterion(preds, targets)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_loss += loss.item()
+        avg_loss = total_loss / (i + 1)
+        loop.set_postfix(
+            {"batch_loss": loss.item(), "avg_loss": avg_loss},
+            refresh=True
+        )
+
+    return total_loss / len(loader)
+
+
+def validate_one_epoch(model, loader, criterion, device):
+    # Evaluates the model without gradient updates
+    model.eval()
+    total_loss = 0.0
+    loop = tqdm(loader, total=len(loader), desc="Validation", leave=True)
+
+    with torch.no_grad():
+        for i, (sky_seq, ts_seq, targets, *_) in enumerate(loop):
+            sky_seq = sky_seq.to(device)
+            ts_seq = ts_seq.to(device)
+            targets = targets.to(device)
+
+            preds = model(sky_seq, ts_seq)
+            loss = criterion(preds, targets)
+
+            total_loss += loss.item()
+            avg_loss = total_loss / (i + 1)
+            loop.set_postfix(
+                {"batch_loss": loss.item(), "avg_loss": avg_loss},
+                refresh=True
+            )
+
+    return total_loss / len(loader)
+
+
+def plot_losses(train_losses, val_losses, save_path="training_curve.png"):
+    # Saves a simple loss curve for later inspection
+    plt.figure(figsize=(8, 5))
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Saved loss plot to {save_path}")
+
+
+def save_checkpoint(state, filename="checkpoint.pth"):
+    # Stores model and optimizer state for recovery
+    torch.save(state, filename)
+    print(f"Checkpoint saved at epoch {state['epoch'] + 1} -> {filename}")
+
+
+def load_checkpoint(filename, model, optimizer, device):
+    # Restores training state from a saved checkpoint
+    checkpoint = torch.load(filename, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer.load_state_dict(checkpoint["optimizer_state"])
+    epoch = checkpoint["epoch"]
+    best_val_loss = checkpoint["best_val_loss"]
+    train_losses = checkpoint["train_losses"]
+    val_losses = checkpoint["val_losses"]
+    print(
+        f"Resumed from checkpoint: epoch {epoch + 1} | "
+        f"best val loss = {best_val_loss:.5f}"
+    )
+    return epoch, best_val_loss, train_losses, val_losses
+
+
+if __name__ == "__main__":
+    import torch.multiprocessing as mp
+    mp.freeze_support()
+
+    CSV_PATH = "dataset_full_1M.csv"
+    BATCH_SIZE = 32
+    NUM_EPOCHS = 25
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    IMG_SEQ_LEN = 5
+    TS_SEQ_LEN = 30
+    HORIZON = 15
+    TARGET_DIM = 1
+
+    print(f"Training on {DEVICE}")
+
+    # Create training and validation datasets
+    train_ds = IrradianceForecastDataset(
+        csv_path=CSV_PATH,
+        split="train",
+        img_seq_len=IMG_SEQ_LEN,
+        ts_seq_len=TS_SEQ_LEN,
+        horizon=HORIZON,
+    )
+
+    val_ds = IrradianceForecastDataset(
+        csv_path=CSV_PATH,
+        split="val",
+        img_seq_len=IMG_SEQ_LEN,
+        ts_seq_len=TS_SEQ_LEN,
+        horizon=HORIZON,
+        normalization_stats=train_ds.normalization_stats,
+    )
+
+    # Save normalization statistics for reproducibility
+    json.dump(
+        {
+            "mean": train_ds.normalization_stats["mean"].to_dict(),
+            "std": train_ds.normalization_stats["std"].to_dict(),
+        },
+        open("norm_stats.json", "w"),
+        indent=4,
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True,
+    )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
+
+    # Initialize the multimodal forecasting model
+    sky_encoder = ImageEncoder(
+        model_name="efficientnet_b0", # swin_tiny_patch4_window7_224, convnextv2_tiny.fcmae_ft_in1k ,efficientnet_b0, regnety_004, convnextv2_tiny, efficientnet_b2
+        pretrained=True,
+        freeze=False,
+    )
+
+    model = MultimodalForecaster(
+        sky_encoder=sky_encoder,
+        ts_feat_dim=len(train_ds.feature_cols),
+        ts_embed_dim=64,
+        fused_dim=256,
+        horizon=HORIZON,
+        target_dim=TARGET_DIM,
+    ).to(DEVICE)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(
+        f"Model ready on {DEVICE} | "
+        f"Total: {total_params / 1e6:.2f}M | "
+        f"Trainable: {trainable_params / 1e6:.2f}M"
+    )
+
+    # Loss function and optimizer setup
+    criterion = nn.MSELoss()
+
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": model.sky_encoder.parameters(), "lr": 3e-6},
+            {"params": model.ts_encoder.parameters(), "lr": 5e-5},
+            {"params": model.cross_fusion.parameters(), "lr": 5e-5},
+            {"params": model.temporal_tf.parameters(), "lr": 5e-5},
+            {"params": model.head.parameters(), "lr": 5e-5},
+        ],
+        weight_decay=1e-4,
+    )
+
+    scaler = torch.amp.GradScaler(
+        device=DEVICE.type if DEVICE.type == "cuda" else "cpu"
+    )
+
+    # Load previous checkpoint if available
+    start_epoch = 0
+    best_val_loss = float("inf")
+    train_losses, val_losses = [], []
+
+    if os.path.exists("checkpoint.pth"):
+        start_epoch, best_val_loss, train_losses, val_losses = load_checkpoint(
+            "checkpoint.pth", model, optimizer, DEVICE
+        )
+    else:
+        print("Starting new training session")
+
+    # Main training loop
+    for epoch in range(start_epoch, NUM_EPOCHS):
+        print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
+
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, criterion, DEVICE, scaler
+        )
+        val_loss = validate_one_epoch(
+            model, val_loader, criterion, DEVICE
+        )
+
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+
+        print(f"Train Loss: {train_loss:.5f} | Val Loss: {val_loss:.5f}")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "best_model.pth")
+            print("Best model updated")
+
+        save_checkpoint(
+            {
+                "epoch": epoch,
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "best_val_loss": best_val_loss,
+                "train_losses": train_losses,
+                "val_losses": val_losses,
+            }
+        )
+
+    plot_losses(train_losses, val_losses)
+    print("\nTraining complete")
+    print(f"Best Validation Loss: {best_val_loss:.5f}")
