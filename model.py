@@ -2,7 +2,7 @@ import math
 import torch
 from torch import nn
 import timm
-
+import mambavision
 
 def causal_mask(T, device):
     # Prevents the model from attending to future time steps
