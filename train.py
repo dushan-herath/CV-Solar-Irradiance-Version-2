@@ -36,7 +36,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
         total_loss += loss.item()
         avg_loss = total_loss / (i + 1)
         loop.set_postfix(
-            {"batch_loss": loss.item(), "avg_loss": avg_loss},
+            { "avg_loss": avg_loss, "batch_loss": loss.item()},
             refresh=True
         )
 
