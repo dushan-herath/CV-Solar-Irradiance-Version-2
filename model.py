@@ -48,9 +48,13 @@ class TS_Encoder(nn.Module):
         super().__init__()
         # Projects raw time-series features into a shared embedding space
         self.net = nn.Sequential(
-            nn.Linear(in_dim, embed_dim),
+            nn.Linear(in_dim, 256),
             nn.GELU(),
-            nn.LayerNorm(embed_dim),
+            nn.Linear(256, 512),
+            nn.GELU(),
+            nn.Linear(512, embed_dim),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim)
         )
 
     def forward(self, x):
