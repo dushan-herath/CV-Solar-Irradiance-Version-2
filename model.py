@@ -2,7 +2,7 @@ import math
 import torch
 from torch import nn
 import timm
-import mambavision
+
 
 def causal_mask(T, device):
     # Prevents the model from attending to future time steps
@@ -121,7 +121,6 @@ class MultimodalForecaster(nn.Module):
         fused_dim=128,
         horizon=25,
         target_dim=1,
-        mode="image",   # <-- NEW: "both" | "image" | "ts"
     ):
         super().__init__()
 
@@ -134,23 +133,11 @@ class MultimodalForecaster(nn.Module):
             out_dim=fused_dim,
         )
 
-        # Projection heads for single-modality modes
-        self.sky_to_fused = nn.Sequential(
-            nn.Linear(sky_encoder.out_dim, fused_dim),
-            nn.GELU(),
-            nn.LayerNorm(fused_dim),
-        )
-
-        self.ts_to_fused = nn.Sequential(
-            nn.Linear(ts_embed_dim, fused_dim),
-            nn.GELU(),
-            nn.LayerNorm(fused_dim),
-        )
-
         self.temp_conv = TemporalConvBlock(fused_dim)
         self.pos_enc = PositionalEncoding(fused_dim)
         self.temporal_tf = TemporalTransformer(fused_dim)
 
+        # Final regression head for multi-step forecasting
         self.head = nn.Sequential(
             nn.Linear(fused_dim, fused_dim // 2),
             nn.GELU(),
@@ -159,58 +146,33 @@ class MultimodalForecaster(nn.Module):
 
         self.horizon = horizon
         self.target_dim = target_dim
-        self.mode = mode.lower()   # <-- store mode
 
+    def forward(self, sky, ts):
+        B, T_img = sky.shape[:2]
 
-    def forward(self, sky=None, ts=None):
-        B = None
+        # Encode each sky image independently using the CNN
+        B, T, C, H, W = sky.shape
+        sky = self.sky_encoder(
+            sky.view(B * T, C, H, W)
+        ).view(B, T, -1)
 
-        # ==========================================================
-        # IMAGE ENCODER (used in "image" or "both")
-        # ==========================================================
-        if self.mode in ("image", "both"):
-            B, T_img, C, H, W = sky.shape
-            sky = self.sky_encoder(
-                sky.view(B * T_img, C, H, W)
-            ).view(B, T_img, -1)
+        # Encode the time-series measurements
+        ts = self.ts_encoder(ts)
 
-        # ==========================================================
-        # TIME-SERIES ENCODER (used in "ts" or "both")
-        # ==========================================================
-        if self.mode in ("ts", "both"):
-            ts = self.ts_encoder(ts)
+        # Match the last image frames with the most recent TS steps
+        ts_img = ts[:, -T_img:]
 
-        # ==========================================================
-        # MODE: IMAGE-ONLY
-        # ==========================================================
-        if self.mode == "image":
-            fused = self.sky_to_fused(sky)
-
-        # ==========================================================
-        # MODE: TIME-SERIES-ONLY
-        # ==========================================================
-        elif self.mode == "ts":
-            fused = self.ts_to_fused(ts)
-
-        # ==========================================================
-        # MODE: CROSS-MODAL (BOTH)
-        # ==========================================================
-        else:  # "both"
-            # align last TS steps with image frames
-            T_img = sky.size(1)
-            ts_img = ts[:, -T_img:]
-            fused = self.cross_fusion(ts_img, sky)
-
-        # shared temporal stack
+        fused = self.cross_fusion(ts_img, sky)
         fused = fused + self.temp_conv(fused)
+
         fused = self.pos_enc(fused)
         fused = self.temporal_tf(fused)
 
+        # Use the final time step as the forecasting context
         context = fused[:, -1]
         out = self.head(context)
 
-        return out.view(fused.size(0), self.horizon, self.target_dim)
-
+        return out.view(B, self.horizon, self.target_dim)
 
 
 if __name__ == "__main__":

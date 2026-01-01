@@ -61,7 +61,7 @@ def validate_one_epoch(model, loader, criterion, device):
             total_loss += loss.item()
             avg_loss = total_loss / (i + 1)
             loop.set_postfix(
-                {"batch_loss": loss.item(), "avg_loss": avg_loss},
+                {"avg_loss": avg_loss, "batch_loss": loss.item()},
                 refresh=True
             )
 
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     mp.freeze_support()
 
     CSV_PATH = "dataset_full_1M.csv"
-    BATCH_SIZE = 32
+    BATCH_SIZE = 4
     NUM_EPOCHS = 25
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     IMG_SEQ_LEN = 5
@@ -167,7 +167,7 @@ if __name__ == "__main__":
 
     # Initialize the multimodal forecasting model
     sky_encoder = ImageEncoder(
-        model_name="vmamba_tiny", # swin_tiny_patch4_window7_224, convnextv2_tiny.fcmae_ft_in1k ,efficientnet_b0, regnety_004, convnextv2_tiny, efficientnet_b2
+        model_name="efficientnet_b0", # swin_tiny_patch4_window7_224, convnextv2_tiny.fcmae_ft_in1k ,efficientnet_b0, regnety_004, convnextv2_tiny, efficientnet_b2
         pretrained=True,
         freeze=False,
     )
