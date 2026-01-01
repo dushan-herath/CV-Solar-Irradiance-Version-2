@@ -45,7 +45,7 @@ class IrradianceForecastDataset(Dataset):
         self.time_col = time_col
 
         # Define input features and prediction targets
-        self.feature_cols = feature_cols or ["ghi", "dni", "dhi", "tod_cos", "tod_sin", "doy_cos", "doy_sin", "solar_zenith", "solar_azimuth"]
+        self.feature_cols = feature_cols or ["ghi", "dni", "dhi", "solar_zenith", "solar_azimuth"]
         self.target_cols = target_cols or ["ghi"]
 
         # Column name containing sky image file paths
