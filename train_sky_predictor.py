@@ -25,7 +25,8 @@ class FutureImageWrapper(torch.utils.data.Dataset):
         self.ts_seq_len = base_ds.ts_seq_len
 
     def __len__(self):
-        return len(self.ds)
+        # ensure we don't index past end of dataframe
+        return len(self.ds) - (self.ts_seq_len + self.horizon)
 
     def __getitem__(self, idx):
         sky_seq, _, _, _, _ = self.ds[idx]
@@ -53,12 +54,12 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler, horizon
     loop = tqdm(loader, total=len(loader), desc="Training", leave=True)
 
     for i, (past_imgs, future_imgs) in enumerate(loop):
-        past_imgs = past_imgs.to(device)
-        future_imgs = future_imgs.to(device)
+        past_imgs = past_imgs.to(device, non_blocking=True)
+        future_imgs = future_imgs.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(device_type="cuda", enabled=(device.type=="cuda")):
             preds = model(
                 past_imgs,
                 future_imgs=future_imgs,   # teacher forcing
@@ -73,8 +74,10 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler, horizon
         total_loss += loss.item()
         avg_loss = total_loss / (i + 1)
 
-        loop.set_postfix({"avg_loss": avg_loss, "batch_loss": loss.item()},
-                         refresh=True)
+        loop.set_postfix(
+            {"avg_loss": f"{avg_loss:.4f}", "batch_loss": f"{loss.item():.4f}"},
+            refresh=True,
+        )
 
     return total_loss / len(loader)
 
@@ -87,8 +90,8 @@ def validate_one_epoch(model, loader, criterion, device, horizon):
 
     with torch.no_grad():
         for i, (past_imgs, future_imgs) in enumerate(loop):
-            past_imgs = past_imgs.to(device)
-            future_imgs = future_imgs.to(device)
+            past_imgs = past_imgs.to(device, non_blocking=True)
+            future_imgs = future_imgs.to(device, non_blocking=True)
 
             preds = model(
                 past_imgs,
@@ -101,8 +104,10 @@ def validate_one_epoch(model, loader, criterion, device, horizon):
             total_loss += loss.item()
             avg_loss = total_loss / (i + 1)
 
-            loop.set_postfix({"avg_loss": avg_loss, "batch_loss": loss.item()},
-                             refresh=True)
+            loop.set_postfix(
+                {"avg_loss": f"{avg_loss:.4f}", "batch_loss": f"{loss.item():.4f}"},
+                refresh=True,
+            )
 
     return total_loss / len(loader)
 
@@ -219,11 +224,10 @@ if __name__ == "__main__":
     # -----------------------------
     model = SkyFutureImagePredictor(
         img_channels=3,
-        hidden_dims=[64, 128, 256],   # encoder depth
-        lstm_hidden=[256, 256],       # ConvLSTM capacity
-        teacher_forcing=False
-    ).cuda()
-
+        hidden_dims=[64, 128, 256],
+        lstm_hidden=[256, 256],
+        teacher_forcing=True,   # enable during training
+    ).to(DEVICE)
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -238,12 +242,10 @@ if __name__ == "__main__":
     # -----------------------------
     criterion = nn.L1Loss()
 
+    # safer: single LR group (architecture independent)
     optimizer = torch.optim.AdamW(
-        [
-            {"params": model.encoder.parameters(), "lr": 3e-4},
-            {"params": model.convlstm.parameters(), "lr": 5e-4},
-            {"params": model.decoder.parameters(), "lr": 5e-4},
-        ],
+        model.parameters(),
+        lr=4e-4,
         weight_decay=1e-4,
     )
 
@@ -275,9 +277,15 @@ if __name__ == "__main__":
             model, train_loader, optimizer, criterion, DEVICE, scaler, HORIZON
         )
 
+        # disable teacher forcing during validation rollout
+        model.teacher_forcing = False
+
         val_loss = validate_one_epoch(
             model, val_loader, criterion, DEVICE, HORIZON
         )
+
+        # re-enable for next train epoch
+        model.teacher_forcing = True
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
