@@ -219,9 +219,11 @@ if __name__ == "__main__":
     # -----------------------------
     model = SkyFutureImagePredictor(
         img_channels=3,
-        hidden_dim=64,
-        teacher_forcing=True,
-    ).to(DEVICE)
+        hidden_dims=[64, 128, 256],   # encoder depth
+        lstm_hidden=[256, 256],       # ConvLSTM capacity
+        teacher_forcing=False
+    ).cuda()
+
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
