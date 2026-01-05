@@ -18,7 +18,7 @@ class IrradianceForecastDataset(Dataset):
         horizon: int = 25,
         feature_cols=None,
         target_cols=None,
-        img_size: int = 224,
+        img_size: int = 64,
         time_col: str = "timestamp",
         normalization_stats: dict = None,
     ):
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     import numpy as np
 
     # Path to the dataset CSV file
-    CSV_PATH = "dataset_full_1M_solar.csv"
+    CSV_PATH = "dataset_full_1M.csv"
 
     # Initialize dataset for inspection
     dataset = IrradianceForecastDataset(
