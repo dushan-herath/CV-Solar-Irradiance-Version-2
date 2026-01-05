@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 # ----------------------
@@ -9,13 +10,12 @@ class ConvEncoder(nn.Module):
     def __init__(self, in_channels=3, hidden_dims=[64, 128, 256]):
         super().__init__()
         layers = []
-        self.skips = []
         prev_ch = in_channels
         for h in hidden_dims:
             conv = nn.Sequential(
                 nn.Conv2d(prev_ch, h, 3, stride=2, padding=1),
                 nn.BatchNorm2d(h),
-                nn.ReLU(inplace=True),
+                nn.ReLU(inplace=True)
             )
             layers.append(conv)
             prev_ch = h
@@ -29,36 +29,52 @@ class ConvEncoder(nn.Module):
             skips.append(x)
         return x, skips  # bottleneck + skip features
 
+
 # ----------------------
 # Conv Decoder with skip connections
 # ----------------------
 class ConvDecoder(nn.Module):
-    def __init__(self, hidden_dims=[256, 128, 64], out_channels=3):
+    def __init__(self, hidden_dims=[256, 128, 64], out_channels=3, encoder_dims=[64,128,256]):
         super().__init__()
+        self.encoder_dims = encoder_dims[::-1]  # reverse for skip connection
         layers = []
-        self.layers = nn.ModuleList()
+        self.skip_projs = nn.ModuleList()
+
         for i, h in enumerate(hidden_dims):
-            deconv = nn.ConvTranspose2d(hidden_dims[i], 
-                                        hidden_dims[i+1] if i+1 < len(hidden_dims) else hidden_dims[i], 
-                                        4, stride=2, padding=1)
+            out_ch = hidden_dims[i+1] if i+1 < len(hidden_dims) else hidden_dims[i]
             layers.append(nn.Sequential(
-                deconv,
-                nn.BatchNorm2d(hidden_dims[i+1] if i+1 < len(hidden_dims) else hidden_dims[i]),
+                nn.ConvTranspose2d(h, out_ch, 4, stride=2, padding=1),
+                nn.BatchNorm2d(out_ch),
                 nn.ReLU(inplace=True)
             ))
+
+            # projection for skip connection if channels differ
+            skip_ch = self.encoder_dims[i] if i < len(self.encoder_dims) else 0
+            if skip_ch != out_ch:
+                self.skip_projs.append(nn.Conv2d(skip_ch, out_ch, 1))
+            else:
+                self.skip_projs.append(nn.Identity())
+
         self.layers = nn.ModuleList(layers)
         self.final = nn.Sequential(
             nn.Conv2d(hidden_dims[-1], out_channels, 3, padding=1),
-            nn.Sigmoid()  # output [0,1]
+            nn.Sigmoid()
         )
 
     def forward(self, x, skips=None):
         for i, layer in enumerate(self.layers):
             x = layer(x)
             if skips is not None and i < len(skips):
-                x = x + skips[-(i+1)]  # skip connection
+                skip = skips[-(i+1)]
+                # Resize spatial dimensions
+                if skip.shape[-2:] != x.shape[-2:]:
+                    skip = F.interpolate(skip, size=x.shape[-2:], mode='bilinear', align_corners=False)
+                # Project channels
+                skip = self.skip_projs[i](skip)
+                x = x + skip
         x = self.final(x)
         return x
+
 
 # ----------------------
 # ConvLSTM Cell
@@ -91,6 +107,7 @@ class ConvLSTMCell(nn.Module):
             torch.zeros(batch, self.hidden_dim, h, w, device=device),
         )
 
+
 # ----------------------
 # Stacked ConvLSTM for sequence modeling
 # ----------------------
@@ -108,14 +125,13 @@ class StackedConvLSTM(nn.Module):
         if states is None:
             states = [cell.init_state(x.size(0), x.shape[-2:]) for cell in self.cells]
 
-        h_out = []
         new_states = []
         h = x
         for i, cell in enumerate(self.cells):
             h, c = cell(h, states[i])
             new_states.append((h, c))
-            h_out.append(h)
-        return h_out[-1], new_states
+        return h, new_states
+
 
 # ----------------------
 # Sky Future Image Predictor
@@ -134,14 +150,14 @@ class SkyFutureImagePredictor(nn.Module):
 
         self.encoder = ConvEncoder(img_channels, hidden_dims)
         self.lstm = StackedConvLSTM(hidden_dims[-1], lstm_hidden)
-        self.decoder = ConvDecoder(hidden_dims[::-1], img_channels)
+        self.decoder = ConvDecoder(hidden_dims[::-1], img_channels, encoder_dims=hidden_dims)
 
     def forward(self, past_imgs, future_imgs: Optional[torch.Tensor]=None, horizon:int=1):
         B, Tin, C, H, W = past_imgs.shape
-        features = []
         skip_feats = []
 
         # Encode past frames
+        features = []
         for t in range(Tin):
             f, skips = self.encoder(past_imgs[:,t])
             features.append(f)
@@ -151,7 +167,7 @@ class SkyFutureImagePredictor(nn.Module):
         h, w = features[0].shape[-2:]
         states = [cell.init_state(B, (h,w)) for cell in self.lstm.cells]
 
-        # Run past sequence through ConvLSTM
+        # Process past sequence
         for f in features:
             out, states = self.lstm(f, states)
 
@@ -160,7 +176,7 @@ class SkyFutureImagePredictor(nn.Module):
 
         for t in range(horizon):
             out, states = self.lstm(x_t, states)
-            skip = skip_feats[-1]  # use last skip (simpler)
+            skip = skip_feats[-1]  # use last skip features
             pred_img = self.decoder(out, skip)
             preds.append(pred_img)
 

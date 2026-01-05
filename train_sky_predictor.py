@@ -7,6 +7,7 @@ from tqdm import tqdm
 from torch import nn
 from torch.utils.data import DataLoader
 from PIL import Image
+import contextlib
 
 from dataset import IrradianceForecastDataset
 from model_sky_predictor import SkyFutureImagePredictor
@@ -25,8 +26,7 @@ class FutureImageWrapper(torch.utils.data.Dataset):
         self.ts_seq_len = base_ds.ts_seq_len
 
     def __len__(self):
-        # ensure we don't index past end of dataframe
-        return len(self.ds) - (self.ts_seq_len + self.horizon)
+        return len(self.ds)
 
     def __getitem__(self, idx):
         sky_seq, _, _, _, _ = self.ds[idx]
@@ -54,12 +54,18 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler, horizon
     loop = tqdm(loader, total=len(loader), desc="Training", leave=True)
 
     for i, (past_imgs, future_imgs) in enumerate(loop):
-        past_imgs = past_imgs.to(device, non_blocking=True)
-        future_imgs = future_imgs.to(device, non_blocking=True)
+        past_imgs = past_imgs.to(device)
+        future_imgs = future_imgs.to(device)
 
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
 
-        with torch.cuda.amp.autocast(device_type="cuda", enabled=(device.type=="cuda")):
+        # -------- autocast fallback (CUDA only) --------
+        if device.type == "cuda":
+            ac = torch.cuda.amp.autocast()
+        else:
+            ac = contextlib.nullcontext()
+
+        with ac:
             preds = model(
                 past_imgs,
                 future_imgs=future_imgs,   # teacher forcing
@@ -67,16 +73,20 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler, horizon
             )
             loss = criterion(preds, future_imgs)
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
         avg_loss = total_loss / (i + 1)
 
         loop.set_postfix(
-            {"avg_loss": f"{avg_loss:.4f}", "batch_loss": f"{loss.item():.4f}"},
-            refresh=True,
+            {"avg_loss": avg_loss, "batch_loss": loss.item()},
+            refresh=True
         )
 
     return total_loss / len(loader)
@@ -90,8 +100,8 @@ def validate_one_epoch(model, loader, criterion, device, horizon):
 
     with torch.no_grad():
         for i, (past_imgs, future_imgs) in enumerate(loop):
-            past_imgs = past_imgs.to(device, non_blocking=True)
-            future_imgs = future_imgs.to(device, non_blocking=True)
+            past_imgs = past_imgs.to(device)
+            future_imgs = future_imgs.to(device)
 
             preds = model(
                 past_imgs,
@@ -105,8 +115,8 @@ def validate_one_epoch(model, loader, criterion, device, horizon):
             avg_loss = total_loss / (i + 1)
 
             loop.set_postfix(
-                {"avg_loss": f"{avg_loss:.4f}", "batch_loss": f"{loss.item():.4f}"},
-                refresh=True,
+                {"avg_loss": avg_loss, "batch_loss": loss.item()},
+                refresh=True
             )
 
     return total_loss / len(loader)
@@ -143,6 +153,7 @@ def load_checkpoint(filename, model, optimizer, device):
     best_val_loss = checkpoint["best_val_loss"]
     train_losses = checkpoint["train_losses"]
     val_losses = checkpoint["val_losses"]
+
     print(
         f"Resumed from checkpoint: epoch {epoch + 1} | "
         f"best val loss = {best_val_loss:.5f}"
@@ -226,7 +237,7 @@ if __name__ == "__main__":
         img_channels=3,
         hidden_dims=[64, 128, 256],
         lstm_hidden=[256, 256],
-        teacher_forcing=True,   # enable during training
+        teacher_forcing=False,
     ).to(DEVICE)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -242,16 +253,34 @@ if __name__ == "__main__":
     # -----------------------------
     criterion = nn.L1Loss()
 
-    # safer: single LR group (architecture independent)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=4e-4,
-        weight_decay=1e-4,
-    )
+    # ---- robust ConvLSTM detection ----
+    if hasattr(model, "convlstm"):
+        convlstm_params = list(model.convlstm.parameters())
+    elif hasattr(model, "convlstm_stack"):
+        convlstm_params = list(model.convlstm_stack.parameters())
+    else:
+        print("WARNING: ConvLSTM module not found — using single LR group")
+        convlstm_params = []
 
-    scaler = torch.amp.GradScaler(
-        device=DEVICE.type if DEVICE.type == "cuda" else "cpu"
-    )
+    # preferred: grouped LR
+    if len(convlstm_params) > 0:
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": model.encoder.parameters(), "lr": 3e-4},
+                {"params": convlstm_params, "lr": 5e-4},
+                {"params": model.decoder.parameters(), "lr": 5e-4},
+            ],
+            weight_decay=1e-4,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=4e-4,
+            weight_decay=1e-4,
+        )
+
+    # ---- GradScaler (CUDA only) ----
+    scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE.type == "cuda"))
 
     # -----------------------------
     # Resume checkpoint if exists
@@ -277,15 +306,9 @@ if __name__ == "__main__":
             model, train_loader, optimizer, criterion, DEVICE, scaler, HORIZON
         )
 
-        # disable teacher forcing during validation rollout
-        model.teacher_forcing = False
-
         val_loss = validate_one_epoch(
             model, val_loader, criterion, DEVICE, HORIZON
         )
-
-        # re-enable for next train epoch
-        model.teacher_forcing = True
 
         train_losses.append(train_loss)
         val_losses.append(val_loss)
