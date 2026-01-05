@@ -171,7 +171,7 @@ if __name__ == "__main__":
     CSV_PATH = "dataset_full_1M.csv"
     BATCH_SIZE = 16
     NUM_EPOCHS = 30
-    IMG_SEQ_LEN = 2
+    IMG_SEQ_LEN = 5
     TS_SEQ_LEN = 30
     HORIZON = 5
     IMG_SIZE = 64
