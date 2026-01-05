@@ -149,7 +149,7 @@ if __name__ == "__main__":
     import numpy as np
 
     # Path to the dataset CSV file
-    CSV_PATH = "dataset_full_1M.csv"
+    CSV_PATH = "dataset_full_30S.csv"
 
     # Initialize dataset for inspection
     dataset = IrradianceForecastDataset(
@@ -157,7 +157,7 @@ if __name__ == "__main__":
         split="train",
         img_seq_len=5,
         ts_seq_len=30,
-        horizon=25,
+        horizon=30,
     )
 
     # Retrieve a single sample from the dataset

@@ -78,10 +78,10 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Dataset and evaluation settings (should match training)
-    CSV_PATH = "dataset_full_1M.csv"
+    CSV_PATH = "dataset_full_30S.csv"
     IMG_SEQ_LEN = 5
     TS_SEQ_LEN = 30
-    MAX_HORIZON = 15
+    MAX_HORIZON = 30
     TARGET_DIM = 1
     BATCH_SIZE = 32
 
