@@ -237,7 +237,7 @@ if __name__ == "__main__":
         img_channels=3,
         hidden_dims=[64, 128, 256],
         lstm_hidden=[256, 256],
-        teacher_forcing=False,
+        teacher_forcing=True,
     ).to(DEVICE)
 
     total_params = sum(p.numel() for p in model.parameters())
