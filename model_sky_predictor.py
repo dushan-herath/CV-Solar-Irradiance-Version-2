@@ -36,7 +36,7 @@ class ConvEncoder(nn.Module):
 class ConvDecoder(nn.Module):
     def __init__(self, hidden_dims=[256, 128, 64], out_channels=3, encoder_dims=[64,128,256]):
         super().__init__()
-        self.encoder_dims = encoder_dims[::-1]  # reverse for skip connection
+        self.encoder_dims = encoder_dims  # keep in original order
         layers = []
         self.skip_projs = nn.ModuleList()
 
@@ -56,24 +56,20 @@ class ConvDecoder(nn.Module):
                 self.skip_projs.append(nn.Identity())
 
         self.layers = nn.ModuleList(layers)
-        self.final = nn.Sequential(
-            nn.Conv2d(hidden_dims[-1], out_channels, 3, padding=1),
-            nn.Sigmoid()
-        )
+        self.final = nn.Conv2d(hidden_dims[-1], out_channels, 3, padding=1)  # no Sigmoid
 
     def forward(self, x, skips=None):
         for i, layer in enumerate(self.layers):
             x = layer(x)
             if skips is not None and i < len(skips):
-                skip = skips[-(i+1)]
-                # Resize spatial dimensions
+                skip = skips[i]
                 if skip.shape[-2:] != x.shape[-2:]:
                     skip = F.interpolate(skip, size=x.shape[-2:], mode='bilinear', align_corners=False)
-                # Project channels
                 skip = self.skip_projs[i](skip)
                 x = x + skip
         x = self.final(x)
         return x
+
 
 
 # ----------------------
@@ -109,7 +105,7 @@ class ConvLSTMCell(nn.Module):
 
 
 # ----------------------
-# Stacked ConvLSTM for sequence modeling
+# Stacked ConvLSTM
 # ----------------------
 class StackedConvLSTM(nn.Module):
     def __init__(self, in_channels, hidden_dims=[256, 256]):
@@ -121,7 +117,6 @@ class StackedConvLSTM(nn.Module):
         self.hidden_dims = hidden_dims
 
     def forward(self, x, states=None):
-        # x: (B,C,H,W)
         if states is None:
             states = [cell.init_state(x.size(0), x.shape[-2:]) for cell in self.cells]
 
@@ -138,7 +133,7 @@ class StackedConvLSTM(nn.Module):
 # ----------------------
 class SkyFutureImagePredictor(nn.Module):
     """
-    High-capacity ConvLSTM + U-Net style encoder-decoder for sky image prediction
+    ConvLSTM + U-Net style encoder-decoder for sky image prediction
     """
     def __init__(self,
                  img_channels=3,
@@ -167,24 +162,25 @@ class SkyFutureImagePredictor(nn.Module):
         h, w = features[0].shape[-2:]
         states = [cell.init_state(B, (h,w)) for cell in self.lstm.cells]
 
-        # Process past sequence
+        # Step through past sequence
         for f in features:
             out, states = self.lstm(f, states)
 
         preds = []
-        x_t = out  # start with last hidden
+        x_t = out  # start with last encoded feature
 
+        # Prediction loop
         for t in range(horizon):
             out, states = self.lstm(x_t, states)
-            skip = skip_feats[-1]  # use last skip features
-            pred_img = self.decoder(out, skip)
+            # Use last skip features for decoder (or could experiment with averaging)
+            pred_img = self.decoder(out, skips=skip_feats[-1])
             preds.append(pred_img)
 
-            # autoregressive / teacher forcing
+            # Teacher forcing / autoregressive
             if self.teacher_forcing and future_imgs is not None:
                 x_t, _ = self.encoder(future_imgs[:, t])
             else:
-                x_t, _ = self.encoder(pred_img.detach())
+                x_t, _ = self.encoder(pred_img)  # keep gradient for learning
 
-        preds = torch.stack(preds, dim=1)  # (B, horizon, C,H,W)
+        preds = torch.stack(preds, dim=1)  # (B, horizon, C, H, W)
         return preds

@@ -147,9 +147,10 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     import pandas as pd
     import numpy as np
+    import torch
 
     # Path to the dataset CSV file
-    CSV_PATH = "dataset_full_30S.csv"
+    CSV_PATH = "dataset_full_1M.csv"
 
     # Initialize dataset for inspection
     dataset = IrradianceForecastDataset(
@@ -161,7 +162,7 @@ if __name__ == "__main__":
     )
 
     # Retrieve a single sample from the dataset
-    sky_seq, ts_seq, target_seq, ts_time, tgt_time = dataset[2440]
+    sky_seq, ts_seq, target_seq, ts_time, tgt_time = dataset[2200]
 
     # Convert timestamp strings back to datetime objects
     ts_time = pd.to_datetime(ts_time)
@@ -174,41 +175,45 @@ if __name__ == "__main__":
     print("History time range:", ts_time[0], "→", ts_time[-1])
     print("Forecast time range:", tgt_time[0], "→", tgt_time[-1])
 
-    # ------------------------------------------------------------
-    # Plot sky image sequence
-    # ------------------------------------------------------------
+    # -------------------------------
+    # Visualize normalized vs denormalized images
+    # -------------------------------
     T = sky_seq.shape[0]
-    fig, axes = plt.subplots(1, T, figsize=(3 * T, 3))
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+    fig, axes = plt.subplots(2, T, figsize=(3 * T, 6))
     if T == 1:
-        axes = [axes]
+        axes = axes.reshape(2, 1)
 
     for i in range(T):
-        img = sky_seq[i].permute(1, 2, 0).numpy()
-        img = img * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]
-        img = img.clip(0, 1)
+        # ---- Normalized image ----
+        img_norm = sky_seq[i].permute(1, 2, 0).numpy()
+        img_norm_disp = img_norm.clip(0, 1)  # Clip for display
+        axes[0, i].imshow(img_norm_disp)
+        axes[0, i].set_title(f"Norm: {ts_time[-T + i].strftime('%H:%M:%S')}")
+        axes[0, i].axis("off")
 
-        axes[i].imshow(img)
-        axes[i].set_title(ts_time[-T + i].strftime("%Y-%m-%d %H:%M:%S"))
-        axes[i].axis("off")
+        # ---- Denormalized image ----
+        img_denorm = sky_seq[i] * std + mean
+        img_denorm = img_denorm.clamp(0, 1)
+        img_denorm = img_denorm.permute(1, 2, 0).numpy()
+        axes[1, i].imshow(img_denorm)
+        axes[1, i].set_title(f"Denorm: {ts_time[-T + i].strftime('%H:%M:%S')}")
+        axes[1, i].axis("off")
 
-    plt.suptitle("Sky Image Sequence")
+    plt.suptitle("Sky Image Sequence: Normalized vs Denormalized")
     plt.tight_layout()
     plt.show()
 
-    # ------------------------------------------------------------
+    # -------------------------------
     # Plot time-series inputs and forecast targets
-    # ------------------------------------------------------------
+    # -------------------------------
+    mean_vals = dataset.normalization_stats["mean"]
+    std_vals = dataset.normalization_stats["std"]
 
-    # Convert normalized values back to original physical units
-    mean = dataset.normalization_stats["mean"]
-    std = dataset.normalization_stats["std"]
-
-    ts_np = ts_seq.numpy() * std.values + mean.values
-    tgt_np = (
-        target_seq.numpy()
-        * std[dataset.target_cols[0]]
-        + mean[dataset.target_cols[0]]
-    )
+    ts_np = ts_seq.numpy() * std_vals.values + mean_vals.values
+    tgt_np = target_seq.numpy() * std_vals[dataset.target_cols[0]] + mean_vals[dataset.target_cols[0]]
 
     # Combine history and forecast timestamps for x-axis labeling
     all_times = ts_time.append(tgt_time)
