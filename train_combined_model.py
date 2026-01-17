@@ -1,6 +1,6 @@
 import os
-import torch
 import contextlib
+import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -25,30 +25,34 @@ class CombinedGHI_Dataset(torch.utils.data.Dataset):
 
 
 # -------------------------
-# Combined model (reg head built externally)
+# Combined model (fixed)
 # -------------------------
 class SkyTS_GHI_Model(nn.Module):
-    def __init__(self, sky_model: SkyFutureImagePredictor, ts_model: TimeSeriesForecaster, reg_input_dim: int, reg_hidden=128, horizon=25):
+    def __init__(self, sky_model: SkyFutureImagePredictor, ts_model: TimeSeriesForecaster,
+                 reg_input_dim: int, reg_hidden=[512, 256], horizon=25):
         """
-        reg_input_dim: actual concatenated feature size (sky + ts)
+        reg_input_dim: size after concatenating (sky_latent + ts_latent)
         """
         super().__init__()
         self.sky_model = sky_model
         self.ts_model = ts_model
         self.horizon = horizon
 
-        # Freeze pretrained models
+        # freeze pretrained models
         for p in self.sky_model.parameters():
             p.requires_grad = False
         for p in self.ts_model.parameters():
             p.requires_grad = False
 
-        # Regression head (built with actual input dim)
-        self.reg_head = nn.Sequential(
-            nn.Linear(reg_input_dim, reg_hidden),
-            nn.ReLU(),
-            nn.Linear(reg_hidden, 1)   # predicting first horizon step (change if you want full horizon)
-        )
+        # Build regression head with computed reg_input_dim
+        layers = []
+        in_dim = reg_input_dim
+        for h in reg_hidden:
+            layers.append(nn.Linear(in_dim, h))
+            layers.append(nn.ReLU())
+            in_dim = h
+        layers.append(nn.Linear(in_dim, 1))  # predict first horizon step
+        self.reg_head = nn.Sequential(*layers)
 
     def forward(self, past_imgs, past_ts):
         """
@@ -59,30 +63,30 @@ class SkyTS_GHI_Model(nn.Module):
 
         # --- sky features ---
         with torch.no_grad():
-            x = past_imgs.view(B * T_img, C, H, W)
-            sky_feat = self.sky_model.encoder(x)   # maybe tensor or (tensor, other)
+            x = past_imgs.view(B * T_img, C, H, W)  # [B*T, C, H, W]
+            sky_feat = self.sky_model.encoder(x)    # could be tensor or (tensor, extras)
             if isinstance(sky_feat, tuple):
                 sky_feat = sky_feat[0]
 
-            # If returned tensor is 4D [B*T, C, H', W'] -> global avg pool
-            if sky_feat.dim() == 4:
-                sky_feat = torch.mean(sky_feat, dim=[2, 3])  # [B*T, C]
-            # now ensure [B*T, C] -> [B, T, C]
-            sky_feat = sky_feat.view(B, T_img, -1)
-            sky_latent = sky_feat[:, -1, :]  # use last timestep -> [B, sky_C]
+            # **IMPORTANT FIX**: if encoder returns spatial map, global-average-pool it
+            if sky_feat.dim() == 4:  # [B*T, C, H', W']
+                sky_feat = torch.mean(sky_feat, dim=[2, 3])  # -> [B*T, C]
 
-        # --- ts features ---
+            # reshape to [B, T, C]
+            sky_feat = sky_feat.view(B, T_img, -1)
+            sky_latent = sky_feat[:, -1, :]  # last timestep -> [B, C]
+
+        # --- ts features (use TS forward as black box) ---
         with torch.no_grad():
             ts_out = self.ts_model(past_ts)  # could be [B, horizon, 1] or [B, horizon] or [B, feat]
             if ts_out.dim() == 3:
-                ts_latent = ts_out.view(B, -1)   # flatten to [B, horizon*1]
+                ts_latent = ts_out.view(B, -1)  # flatten -> [B, horizon*1]
             elif ts_out.dim() == 2:
-                ts_latent = ts_out               # already [B, N]
+                ts_latent = ts_out            # [B, N]
             else:
-                # fallback: flatten any other shape
                 ts_latent = ts_out.view(B, -1)
 
-        # --- concat & regress ---
+        # --- concat & predict ---
         combined = torch.cat([sky_latent, ts_latent], dim=-1)  # [B, reg_input_dim]
         ghi_pred = self.reg_head(combined)                     # [B, 1]
         return ghi_pred
@@ -100,11 +104,14 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
         past_ts = past_ts.to(device)
         future_ghi = future_ghi.to(device)
 
+        # squeeze target to [B,1]
+        future_ghi = future_ghi[:, 0, 0:1]
+
         optimizer.zero_grad()
-        ac = torch.cuda.amp.autocast() if device.type == "cuda" else contextlib.nullcontext()
+        ac = torch.amp.autocast(device_type='cuda') if device.type == "cuda" else contextlib.nullcontext()
         with ac:
-            preds = model(past_imgs, past_ts)           # [B, 1]
-            loss = criterion(preds, future_ghi[:, 0:1]) # first horizon step
+            preds = model(past_imgs, past_ts)           # [B,1]
+            loss = criterion(preds, future_ghi)         # [B,1] vs [B,1]
 
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -128,16 +135,18 @@ def validate_one_epoch(model, loader, criterion, device):
             past_imgs = past_imgs.to(device)
             past_ts = past_ts.to(device)
             future_ghi = future_ghi.to(device)
+            future_ghi = future_ghi[:, 0, 0:1]
 
             preds = model(past_imgs, past_ts)
-            loss = criterion(preds, future_ghi[:, 0:1])
+            loss = criterion(preds, future_ghi)
+
             total_loss += loss.item()
             loop.set_postfix({"val_loss": total_loss / (loop.n + 1)})
     return total_loss / len(loader)
 
 
 # -------------------------
-# Main
+# Main entry
 # -------------------------
 if __name__ == "__main__":
     CSV_PATH = "dataset_full_1M.csv"
@@ -152,7 +161,7 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on {DEVICE}")
 
-    # Dataset
+    # dataset
     train_base = IrradianceForecastDataset(CSV_PATH, split="train",
                                            img_seq_len=IMG_SEQ_LEN,
                                            ts_seq_len=TS_SEQ_LEN,
@@ -168,10 +177,10 @@ if __name__ == "__main__":
     train_ds = CombinedGHI_Dataset(train_base)
     val_ds = CombinedGHI_Dataset(val_base)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=(DEVICE.type=="cuda"))
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=(DEVICE.type=="cuda"))
 
-    # Load pretrained models
+    # load pretrained models
     sky_model = SkyFutureImagePredictor(img_channels=3,
                                         hidden_dims=[64,128,256],
                                         lstm_hidden=[256,256],
@@ -185,16 +194,16 @@ if __name__ == "__main__":
                                     target_dim=1).to(DEVICE)
     ts_model.load_state_dict(torch.load("best_ts_model.pth", map_location=DEVICE))
 
-    # --- compute actual reg_input_dim using dummy batch ---
+    # compute reg_input_dim dynamically using dummy inputs (safe)
     with torch.no_grad():
         dummy_img = torch.zeros(1, IMG_SEQ_LEN, 3, IMG_SIZE, IMG_SIZE).to(DEVICE)
         sky_feat = sky_model.encoder(dummy_img.view(1 * IMG_SEQ_LEN, 3, IMG_SIZE, IMG_SIZE))
         if isinstance(sky_feat, tuple):
             sky_feat = sky_feat[0]
         if sky_feat.dim() == 4:
-            sky_feat = torch.mean(sky_feat, dim=[2, 3])  # [1*T, C]
+            sky_feat = torch.mean(sky_feat, dim=[2, 3])  # global avg pool
         sky_feat = sky_feat.view(1, IMG_SEQ_LEN, -1)
-        sky_latent = sky_feat[:, -1, :]              # [1, sky_C]
+        sky_latent = sky_feat[:, -1, :]
         sky_latent_dim = sky_latent.shape[-1]
 
         dummy_ts = torch.zeros(1, TS_SEQ_LEN, TS_FEAT_DIM).to(DEVICE)
@@ -207,14 +216,15 @@ if __name__ == "__main__":
     reg_input_dim = sky_latent_dim + ts_latent_dim
     print(f"Computed reg_input_dim = {reg_input_dim} (sky {sky_latent_dim} + ts {ts_latent_dim})")
 
-    # Instantiate combined model with correct reg_input_dim
-    model = SkyTS_GHI_Model(sky_model, ts_model, reg_input_dim=reg_input_dim, horizon=HORIZON).to(DEVICE)
+    # instantiate combined model with correct input dim
+    model = SkyTS_GHI_Model(sky_model, ts_model, reg_input_dim=reg_input_dim, reg_hidden=[512,256], horizon=HORIZON).to(DEVICE)
 
-    # Only train reg_head parameters
+    # optimizer only for reg_head
     optimizer = torch.optim.AdamW(model.reg_head.parameters(), lr=4e-4, weight_decay=1e-4)
     criterion = nn.L1Loss()
-    scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE.type == "cuda"))
+    scaler = torch.amp.GradScaler(enabled=(DEVICE.type=="cuda"))
 
+    # training loop
     best_val_loss = float("inf")
     for epoch in range(NUM_EPOCHS):
         print(f"\nEpoch {epoch+1}/{NUM_EPOCHS}")
