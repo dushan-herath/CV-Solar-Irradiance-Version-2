@@ -8,11 +8,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from dataset import IrradianceForecastDataset
-from model import ImageEncoder, MultimodalForecaster
+# Use the ViT encoder instead of ImageEncoder
+from model import VisionTransformerEncoder, MultimodalForecaster
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
-    # Runs one full training pass over the dataset
     model.train()
     total_loss = 0.0
     loop = tqdm(loader, total=len(loader), desc="Training", leave=True)
@@ -24,7 +24,6 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
 
         optimizer.zero_grad()
 
-        # Mixed precision forward pass
         with torch.cuda.amp.autocast():
             preds = model(sky_seq, ts_seq)
             loss = criterion(preds, targets)
@@ -36,7 +35,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
         total_loss += loss.item()
         avg_loss = total_loss / (i + 1)
         loop.set_postfix(
-            { "avg_loss": avg_loss, "batch_loss": loss.item()},
+            {"avg_loss": avg_loss, "batch_loss": loss.item()},
             refresh=True
         )
 
@@ -44,7 +43,6 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
 
 
 def validate_one_epoch(model, loader, criterion, device):
-    # Evaluates the model without gradient updates
     model.eval()
     total_loss = 0.0
     loop = tqdm(loader, total=len(loader), desc="Validation", leave=True)
@@ -69,7 +67,6 @@ def validate_one_epoch(model, loader, criterion, device):
 
 
 def plot_losses(train_losses, val_losses, save_path="training_curve.png"):
-    # Saves a simple loss curve for later inspection
     plt.figure(figsize=(8, 5))
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Val Loss")
@@ -85,13 +82,11 @@ def plot_losses(train_losses, val_losses, save_path="training_curve.png"):
 
 
 def save_checkpoint(state, filename="checkpoint.pth"):
-    # Stores model and optimizer state for recovery
     torch.save(state, filename)
     print(f"Checkpoint saved at epoch {state['epoch'] + 1} -> {filename}")
 
 
 def load_checkpoint(filename, model, optimizer, device):
-    # Restores training state from a saved checkpoint
     checkpoint = torch.load(filename, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
     optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -139,7 +134,7 @@ if __name__ == "__main__":
         normalization_stats=train_ds.normalization_stats,
     )
 
-    # Save normalization statistics for reproducibility
+    # Save normalization statistics
     json.dump(
         {
             "mean": train_ds.normalization_stats["mean"].to_dict(),
@@ -165,12 +160,14 @@ if __name__ == "__main__":
         pin_memory=True,
     )
 
-    # Initialize the multimodal forecasting model
-    sky_encoder = ImageEncoder(
-        model_name="resnet18", # swin_tiny_patch4_window7_224, convnextv2_tiny.fcmae_ft_in1k ,efficientnet_b0, regnety_004, convnextv2_tiny, efficientnet_b2
+    # Initialize the ViT-based multimodal forecasting model
+    sky_encoder = VisionTransformerEncoder(
+        model_name="vit_base_patch16_224",
+        img_size=64,        # 🔑 match dataset
         pretrained=True,
         freeze=False,
     )
+
 
     model = MultimodalForecaster(
         sky_encoder=sky_encoder,
@@ -189,9 +186,7 @@ if __name__ == "__main__":
         f"Trainable: {trainable_params / 1e6:.2f}M"
     )
 
-    # Loss function and optimizer setup
     criterion = nn.MSELoss()
-
     optimizer = torch.optim.AdamW(
         [
             {"params": model.sky_encoder.parameters(), "lr": 3e-6},
@@ -207,7 +202,6 @@ if __name__ == "__main__":
         device=DEVICE.type if DEVICE.type == "cuda" else "cpu"
     )
 
-    # Load previous checkpoint if available
     start_epoch = 0
     best_val_loss = float("inf")
     train_losses, val_losses = [], []
@@ -219,7 +213,6 @@ if __name__ == "__main__":
     else:
         print("Starting new training session")
 
-    # Main training loop
     for epoch in range(start_epoch, NUM_EPOCHS):
         print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
 

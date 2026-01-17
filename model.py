@@ -3,16 +3,19 @@ import torch
 from torch import nn
 import timm
 
-
+# ----------------------
+# Utility: causal mask
+# ----------------------
 def causal_mask(T, device):
     # Prevents the model from attending to future time steps
     return torch.triu(torch.ones(T, T, device=device), diagonal=1).bool()
 
-
+# ----------------------
+# Temporal convolution block
+# ----------------------
 class TemporalConvBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        # Lightweight temporal convolution for local sequence refinement
         self.net = nn.Sequential(
             nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim),
             nn.GELU(),
@@ -22,17 +25,27 @@ class TemporalConvBlock(nn.Module):
     def forward(self, x):
         return self.net(x.transpose(1, 2)).transpose(1, 2)
 
-
-class ImageEncoder(nn.Module):
-    def __init__(self, model_name, pretrained=True, freeze=True):
+# ----------------------
+# Vision Transformer Encoder
+# ----------------------
+class VisionTransformerEncoder(nn.Module):
+    def __init__(
+        self,
+        model_name="vit_base_patch16_224",
+        img_size=64,          # 🔑 match dataset
+        pretrained=True,
+        freeze=True,
+    ):
         super().__init__()
-        # CNN backbone used to extract features from sky images
+
         self.backbone = timm.create_model(
             model_name,
             pretrained=pretrained,
             num_classes=0,
+            img_size=img_size,   # 🔑 override expected size
             global_pool="avg",
         )
+
         self.out_dim = self.backbone.num_features
 
         if freeze:
@@ -43,10 +56,12 @@ class ImageEncoder(nn.Module):
         return self.backbone(x)
 
 
+# ----------------------
+# Time-series encoder
+# ----------------------
 class TS_Encoder(nn.Module):
     def __init__(self, in_dim, embed_dim):
         super().__init__()
-        # Projects raw time-series features into a shared embedding space
         self.net = nn.Sequential(
             nn.Linear(in_dim, 256),
             nn.GELU(),
@@ -60,11 +75,12 @@ class TS_Encoder(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
+# ----------------------
+# Positional encoding
+# ----------------------
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
-        # Standard sinusoidal positional encoding
         pos = torch.arange(max_len).unsqueeze(1)
         div = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
         pe = torch.zeros(max_len, d_model)
@@ -75,18 +91,16 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pe[:, : x.size(1)]
 
-
+# ----------------------
+# Cross-modal fusion
+# ----------------------
 class CrossModalFusion(nn.Module):
     def __init__(self, img_dim, ts_dim, out_dim):
         super().__init__()
-        # Aligns image features to the time-series embedding space
         self.img_proj = nn.Linear(img_dim, ts_dim)
-
-        # Cross-attention where TS queries attend to sky features
         self.attn = nn.MultiheadAttention(
             ts_dim, num_heads=4, batch_first=True
         )
-
         self.proj = nn.Sequential(
             nn.Linear(ts_dim * 2, out_dim),
             nn.GELU(),
@@ -98,11 +112,12 @@ class CrossModalFusion(nn.Module):
         attn, _ = self.attn(ts, img, img)
         return self.proj(torch.cat([ts, attn], dim=-1))
 
-
+# ----------------------
+# Temporal transformer
+# ----------------------
 class TemporalTransformer(nn.Module):
     def __init__(self, d_model):
         super().__init__()
-        # Causal transformer encoder for temporal modeling
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=8,
@@ -115,7 +130,9 @@ class TemporalTransformer(nn.Module):
         mask = causal_mask(x.size(1), x.device)
         return self.encoder(x, mask)
 
-
+# ----------------------
+# Multimodal forecaster
+# ----------------------
 class MultimodalForecaster(nn.Module):
     def __init__(
         self,
@@ -141,7 +158,6 @@ class MultimodalForecaster(nn.Module):
         self.pos_enc = PositionalEncoding(fused_dim)
         self.temporal_tf = TemporalTransformer(fused_dim)
 
-        # Final regression head for multi-step forecasting
         self.head = nn.Sequential(
             nn.Linear(fused_dim, fused_dim // 2),
             nn.GELU(),
@@ -154,35 +170,36 @@ class MultimodalForecaster(nn.Module):
     def forward(self, sky, ts):
         B, T_img = sky.shape[:2]
 
-        # Encode each sky image independently using the CNN
+        # Encode sky images with ViT
         B, T, C, H, W = sky.shape
-        sky = self.sky_encoder(
-            sky.view(B * T, C, H, W)
-        ).view(B, T, -1)
+        sky = self.sky_encoder(sky.view(B * T, C, H, W)).view(B, T, -1)
 
-        # Encode the time-series measurements
+        # Encode time-series features
         ts = self.ts_encoder(ts)
 
-        # Match the last image frames with the most recent TS steps
+        # Match last image frames with recent TS steps
         ts_img = ts[:, -T_img:]
 
+        # Cross-modal fusion
         fused = self.cross_fusion(ts_img, sky)
         fused = fused + self.temp_conv(fused)
 
         fused = self.pos_enc(fused)
         fused = self.temporal_tf(fused)
 
-        # Use the final time step as the forecasting context
+        # Use final time-step for forecasting
         context = fused[:, -1]
         out = self.head(context)
 
         return out.view(B, self.horizon, self.target_dim)
 
-
+# ----------------------
+# Example usage
+# ----------------------
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    sky_enc = ImageEncoder("resnet18", pretrained=True)
+    sky_enc = VisionTransformerEncoder("vit_base_patch16_224", pretrained=True)
 
     model = MultimodalForecaster(
         sky_encoder=sky_enc,

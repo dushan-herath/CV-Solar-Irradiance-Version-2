@@ -16,20 +16,16 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import IrradianceForecastDataset
-from model import ImageEncoder, MultimodalForecaster
+# 🔁 CHANGE: import ViT encoder
+from model import VisionTransformerEncoder, MultimodalForecaster
 
 
 @torch.no_grad()
 def evaluate(model, loader, device, mean_targets, std_targets):
-    """
-    Runs forward passes on the validation set and computes
-    prediction errors after denormalization.
-    """
     model.eval()
     all_preds = []
     all_targets = []
 
-    # Iterate over validation batches
     for sky_seq, ts_seq, targets, *_ in tqdm(
         loader, desc="Evaluating", leave=False
     ):
@@ -37,25 +33,21 @@ def evaluate(model, loader, device, mean_targets, std_targets):
         ts_seq = ts_seq.to(device)
         targets = targets.to(device)
 
-        # Forward pass
         preds = model(sky_seq, ts_seq)
 
-        # Safety check in case horizon lengths do not match exactly
+        # Safety check
         if preds.shape[1] != targets.shape[1]:
             preds = preds[:, : targets.shape[1], :]
 
         all_preds.append(preds.cpu().numpy())
         all_targets.append(targets.cpu().numpy())
 
-    # Stack all batches into full arrays
     preds = np.concatenate(all_preds, axis=0)
     targets = np.concatenate(all_targets, axis=0)
 
-    # Convert predictions and targets back to physical units
     preds_denorm = preds * std_targets + mean_targets
     targets_denorm = targets * std_targets + mean_targets
 
-    # Compute forecast errors
     errors = preds_denorm - targets_denorm
     mse_per_horizon = np.mean(errors ** 2, axis=0)
     mae_per_horizon = np.mean(np.abs(errors), axis=0)
@@ -74,10 +66,8 @@ if __name__ == "__main__":
     import torch.multiprocessing as mp
     mp.freeze_support()
 
-    # Device configuration
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Dataset and evaluation settings (should match training)
     CSV_PATH = "dataset_full_1M.csv"
     IMG_SEQ_LEN = 5
     TS_SEQ_LEN = 30
@@ -87,7 +77,6 @@ if __name__ == "__main__":
 
     print(f"Exporting predictions and metrics on {DEVICE}")
 
-    # Load normalization statistics saved during training
     if not os.path.exists("norm_stats.json"):
         raise FileNotFoundError("norm_stats.json not found")
 
@@ -96,7 +85,6 @@ if __name__ == "__main__":
     full_std = pd.Series(full_norm_stats["std"])
     normalization_stats = {"mean": full_mean, "std": full_std}
 
-    # Target variable configuration
     TARGET_NAMES = ["ghi"]
     mean_targets = np.array(
         [full_mean[n] for n in TARGET_NAMES]
@@ -105,7 +93,6 @@ if __name__ == "__main__":
         [full_std[n] for n in TARGET_NAMES]
     ).reshape(1, 1, TARGET_DIM)
 
-    # Initialize validation dataset and loader
     val_ds = IrradianceForecastDataset(
         csv_path=CSV_PATH,
         split="val",
@@ -128,9 +115,10 @@ if __name__ == "__main__":
         f"horizon={MAX_HORIZON}"
     )
 
-    # Build model using the same architecture as training
-    sky_encoder = ImageEncoder(
-        model_name="resnet18",
+    # 🔁 CHANGE: ViT encoder (must match training)
+    sky_encoder = VisionTransformerEncoder(
+        model_name="vit_base_patch16_224",
+        img_size=64,      # 🔑 MUST match dataset
         pretrained=True,
         freeze=True,
     )
@@ -144,7 +132,6 @@ if __name__ == "__main__":
         target_dim=TARGET_DIM,
     ).to(DEVICE)
 
-    # Load the best checkpoint from training
     if not os.path.exists("best_model.pth"):
         raise FileNotFoundError("best_model.pth not found")
 
@@ -153,12 +140,10 @@ if __name__ == "__main__":
     )
     print("Loaded trained model weights")
 
-    # Run evaluation
     preds_denorm, targets_denorm, mse, mae, rmse = evaluate(
         model, val_loader, DEVICE, mean_targets, std_targets
     )
 
-    # Save all outputs into a single compressed file
     save_path = "forecast_results.npz"
     np.savez_compressed(
         save_path,
