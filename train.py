@@ -111,7 +111,7 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     IMG_SEQ_LEN = 5
     TS_SEQ_LEN = 30
-    HORIZON = 30
+    HORIZON = 15
     TARGET_DIM = 1
 
     print(f"Training on {DEVICE}")
