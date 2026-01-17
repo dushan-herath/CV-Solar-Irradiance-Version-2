@@ -68,10 +68,10 @@ if __name__ == "__main__":
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    CSV_PATH = "dataset_full_1M.csv"
-    IMG_SEQ_LEN = 5
-    TS_SEQ_LEN = 30
-    MAX_HORIZON = 15
+    CSV_PATH = "dataset_full_30S.csv"
+    IMG_SEQ_LEN = 10
+    TS_SEQ_LEN = 60
+    MAX_HORIZON = 30
     TARGET_DIM = 1
     BATCH_SIZE = 32
 
