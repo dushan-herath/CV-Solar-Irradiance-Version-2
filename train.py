@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 from dataset import IrradianceForecastDataset
 # Use the ViT encoder instead of ImageEncoder
 from model import VisionTransformerEncoder, MultimodalForecaster
+from vit_lite import ViTLite
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
@@ -105,13 +106,13 @@ if __name__ == "__main__":
     import torch.multiprocessing as mp
     mp.freeze_support()
 
-    CSV_PATH = "dataset_full_30S.csv"
+    CSV_PATH = "dataset_full_1M.csv"
     BATCH_SIZE = 32
     NUM_EPOCHS = 25
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    IMG_SEQ_LEN = 10
-    TS_SEQ_LEN = 60
-    HORIZON = 30
+    IMG_SEQ_LEN = 5
+    TS_SEQ_LEN = 30
+    HORIZON = 15
     TARGET_DIM = 1
 
     print(f"Training on {DEVICE}")
@@ -160,15 +161,16 @@ if __name__ == "__main__":
         pin_memory=True,
     )
 
-    # Initialize the ViT-based multimodal forecasting model
-    sky_encoder = VisionTransformerEncoder(
-        model_name="vit_base_patch16_224",
-        img_size=64,        # 🔑 match dataset
-        pretrained=True,
-        freeze=False,
+
+
+    sky_encoder = ViTLite(
+        img_size=64,
+        patch_size=8,
+        embed_dim=128,
+        depth=4,
+        num_heads=4,
+        dropout=0.3
     )
-
-
     model = MultimodalForecaster(
         sky_encoder=sky_encoder,
         ts_feat_dim=len(train_ds.feature_cols),

@@ -18,7 +18,7 @@ from tqdm import tqdm
 from dataset import IrradianceForecastDataset
 # 🔁 CHANGE: import ViT encoder
 from model import VisionTransformerEncoder, MultimodalForecaster
-
+from vit_lite import ViTLite
 
 @torch.no_grad()
 def evaluate(model, loader, device, mean_targets, std_targets):
@@ -68,10 +68,10 @@ if __name__ == "__main__":
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    CSV_PATH = "dataset_full_30S.csv"
-    IMG_SEQ_LEN = 10
-    TS_SEQ_LEN = 60
-    MAX_HORIZON = 30
+    CSV_PATH = "dataset_full_1M.csv"
+    IMG_SEQ_LEN = 5
+    TS_SEQ_LEN = 30
+    MAX_HORIZON = 15
     TARGET_DIM = 1
     BATCH_SIZE = 32
 
@@ -115,12 +115,13 @@ if __name__ == "__main__":
         f"horizon={MAX_HORIZON}"
     )
 
-    # 🔁 CHANGE: ViT encoder (must match training)
-    sky_encoder = VisionTransformerEncoder(
-        model_name="vit_base_patch16_224",
-        img_size=64,      # 🔑 MUST match dataset
-        pretrained=True,
-        freeze=True,
+    sky_encoder = ViTLite(
+        img_size=64,
+        patch_size=8,
+        embed_dim=128,
+        depth=4,
+        num_heads=4,
+        dropout=0.3
     )
 
     model = MultimodalForecaster(
