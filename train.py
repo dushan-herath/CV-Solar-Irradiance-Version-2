@@ -168,8 +168,8 @@ if __name__ == "__main__":
         img_size=64,
         patch_size=8,
         embed_dim=128,
-        depth=4,
-        num_heads=4,
+        depth=6,
+        num_heads=8,
         dropout=0.3
     )
     sky_encoder = SESIBViTWrapper(sky_encoder_base, patch_size=8)
