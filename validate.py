@@ -19,7 +19,7 @@ from dataset import IrradianceForecastDataset
 # 🔁 CHANGE: import ViT encoder
 from model import VisionTransformerEncoder, MultimodalForecaster
 from vit_lite import ViTLite
-from vit_lite import SESIBViTWrapper
+
 
 @torch.no_grad()
 def evaluate(model, loader, device, mean_targets, std_targets):
