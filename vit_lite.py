@@ -31,19 +31,26 @@ def resize_pos_embed(pos_embed, new_num_patches):
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=64, patch_size=8, in_chans=3, embed_dim=128):
         super().__init__()
-        self.patch_size = patch_size
+        assert patch_size in [4, 8, 16], "Use powers of 2 for conv stem"
+
         self.num_patches = (img_size // patch_size) ** 2
-        self.proj = nn.Conv2d(
-            in_chans, embed_dim,
-            kernel_size=patch_size,
-            stride=patch_size
+
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_chans, embed_dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(embed_dim // 2),
+            nn.GELU(),
+
+            nn.Conv2d(embed_dim // 2, embed_dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(embed_dim // 2),
+            nn.GELU(),
+
+            nn.Conv2d(embed_dim // 2, embed_dim, kernel_size=3, stride=2, padding=1),
         )
 
     def forward(self, x):
-        x = self.proj(x)                     # (B, D, H/P, W/P)
-        x = x.flatten(2).transpose(1, 2)     # (B, N, D)
+        x = self.proj(x)                 # (B, D, H/P, W/P)
+        x = x.flatten(2).transpose(1, 2) # (B, N, D)
         return x
-
 
 # ==================================================
 # Transformer Block (UNCHANGED)
