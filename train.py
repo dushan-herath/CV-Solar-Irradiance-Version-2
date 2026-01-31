@@ -11,7 +11,7 @@ from dataset import IrradianceForecastDataset
 # Use the ViT encoder instead of ImageEncoder
 from model import VisionTransformerEncoder, MultimodalForecaster
 from vit_lite import ViTLite 
-from vit_lite import SESIBViTWrapper
+
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
@@ -163,16 +163,16 @@ if __name__ == "__main__":
     )
 
 
-
-    sky_encoder_base = ViTLite(
-        img_size=112,
+    sky_encoder = ViTLite(
+        img_size=64,
         patch_size=8,
         embed_dim=128,
         depth=6,
         num_heads=8,
         dropout=0.3
     )
-    sky_encoder = SESIBViTWrapper(sky_encoder_base, patch_size=8)
+
+    
     model = MultimodalForecaster(
         sky_encoder=sky_encoder,
         ts_feat_dim=len(train_ds.feature_cols),

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ==================================================
-# Utility: Resize Positional Embeddings (CRITICAL)
+# Utility: Resize Positional Embeddings
 # ==================================================
 def resize_pos_embed(pos_embed, new_num_patches):
     """
@@ -18,15 +18,17 @@ def resize_pos_embed(pos_embed, new_num_patches):
 
     pos = pos_embed.reshape(1, orig_size, orig_size, D).permute(0, 3, 1, 2)
     pos = F.interpolate(
-        pos, size=(new_size, new_size),
-        mode="bilinear", align_corners=False
+        pos,
+        size=(new_size, new_size),
+        mode="bilinear",
+        align_corners=False
     )
     pos = pos.permute(0, 2, 3, 1).reshape(1, new_num_patches, D)
     return pos
 
 
 # ==================================================
-# Patch Embedding
+# Patch Embedding (Conv Stem)
 # ==================================================
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=64, patch_size=8, in_chans=3, embed_dim=128):
@@ -52,20 +54,25 @@ class PatchEmbed(nn.Module):
         x = x.flatten(2).transpose(1, 2) # (B, N, D)
         return x
 
+
 # ==================================================
-# Transformer Block (UNCHANGED)
+# Transformer Block
 # ==================================================
 class TransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=2.0, dropout=0.2):
         super().__init__()
+
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(
-            dim, num_heads,
+            dim,
+            num_heads,
             dropout=dropout,
             batch_first=True
         )
+
         self.norm2 = nn.LayerNorm(dim)
         hidden_dim = int(dim * mlp_ratio)
+
         self.mlp = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
@@ -87,13 +94,14 @@ class TransformerBlock(nn.Module):
 
 
 # ==================================================
-# ViT-Lite Encoder (UNCHANGED API)
+# ViT-Lite (Basic Vision Transformer)
 # ==================================================
 class ViTLite(nn.Module):
     def __init__(
         self,
         img_size=64,
         patch_size=8,
+        in_chans=3,
         embed_dim=128,
         depth=4,
         num_heads=4,
@@ -102,11 +110,13 @@ class ViTLite(nn.Module):
     ):
         super().__init__()
 
+        self.embed_dim = embed_dim
         self.out_dim = embed_dim
 
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
+            in_chans=in_chans,
             embed_dim=embed_dim
         )
 
@@ -132,96 +142,31 @@ class ViTLite(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        raise RuntimeError(
-            "Do not call ViTLite directly. "
-            "Wrap it with SESIBViTWrapper."
-        )
+        # ----------------------------------------------
+        # 1. Patch embedding
+        # ----------------------------------------------
+        x = self.patch_embed(x)  # (B, N, D)
+        N = x.shape[1]
 
+        # ----------------------------------------------
+        # 2. Positional embedding
+        # ----------------------------------------------
+        pos_embed = resize_pos_embed(self.pos_embed, N).to(x.device)
+        x = x + pos_embed
+        x = self.pos_drop(x)
 
-# ==================================================
-# Solar Proxy Head (Self-Supervised)
-# ==================================================
-class SolarProxyHead(nn.Module):
-    def __init__(self, in_ch=3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, 16, 3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(16, 1, 1),
-            nn.Sigmoid()
-        )
+        # ----------------------------------------------
+        # 3. Transformer encoder
+        # ----------------------------------------------
+        for blk in self.blocks:
+            x = blk(x)
 
-    def forward(self, x):
-        return self.net(x)  # (B,1,H,W)
+        x = self.norm(x)
 
-
-# ==================================================
-# SESIB-ViT Wrapper (FINAL, STABLE)
-# ==================================================
-class SESIBViTWrapper(nn.Module):
-    """
-    Drop-in replacement for ViTLite.
-    Fully compatible with your training code.
-    """
-    def __init__(self, vit_model: ViTLite, patch_size=8):
-        super().__init__()
-        self.vit = vit_model
-        self.patch_size = patch_size
-
-        self.solar_proxy = SolarProxyHead(in_ch=3)
-
-        # Learnable physical strength (kept small for stability)
-        self.lambda_phys = nn.Parameter(torch.tensor(0.05))
-
-        # Required by MultimodalForecaster
-        self.out_dim = vit_model.out_dim
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-
-        # --------------------------------------------------
-        # 1. Solar proxy → patch-level importance
-        # --------------------------------------------------
-        solar_map = self.solar_proxy(x)  # (B,1,H,W)
-
-        solar_patch = F.avg_pool2d(
-            solar_map,
-            kernel_size=self.patch_size,
-            stride=self.patch_size
-        ).flatten(1)  # (B,N)
-
-        # Zero-mean for stability
-        solar_patch = solar_patch - solar_patch.mean(dim=1, keepdim=True)
-
-        # --------------------------------------------------
-        # 2. Patch embeddings
-        # --------------------------------------------------
-        x_patch = self.vit.patch_embed(x)  # (B,N,D)
-        N = x_patch.shape[1]
-
-        pos_embed = resize_pos_embed(
-            self.vit.pos_embed, N
-        ).to(x_patch.device)
-
-        x_patch = x_patch + pos_embed
-        x_patch = self.vit.pos_drop(x_patch)
-
-        # --------------------------------------------------
-        # 3. SESIB physical gating (KEY MECHANISM)
-        # --------------------------------------------------
-        gate = 1.0 + self.lambda_phys * solar_patch.unsqueeze(-1)
-        x_patch = x_patch * gate
-
-        # --------------------------------------------------
-        # 4. Transformer blocks
-        # --------------------------------------------------
-        for blk in self.vit.blocks:
-            x_patch = blk(x_patch)
-
-        x_patch = self.vit.norm(x_patch)
-
-        # Global average pooling
-        return x_patch.mean(dim=1)
+        # ----------------------------------------------
+        # 4. Global average pooling
+        # ----------------------------------------------
+        return x.mean(dim=1)  # (B, D)
 
 
 # ==================================================
@@ -230,7 +175,7 @@ class SESIBViTWrapper(nn.Module):
 if __name__ == "__main__":
     x = torch.randn(2, 3, 64, 64)
 
-    vit = ViTLite(
+    model = ViTLite(
         img_size=64,
         patch_size=8,
         embed_dim=128,
@@ -238,8 +183,7 @@ if __name__ == "__main__":
         num_heads=4
     )
 
-    model = SESIBViTWrapper(vit, patch_size=8)
     y = model(x)
 
-    print("Output:", y.shape)      # (2,128)
+    print("Output shape:", y.shape)  # (2, 128)
     print("out_dim:", model.out_dim)
