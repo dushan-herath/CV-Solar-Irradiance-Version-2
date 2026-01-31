@@ -182,6 +182,10 @@ if __name__ == "__main__":
         target_dim=TARGET_DIM,
     ).to(DEVICE)
 
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = nn.DataParallel(model)
+
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(
@@ -205,6 +209,8 @@ if __name__ == "__main__":
     scaler = torch.amp.GradScaler(
         device=DEVICE.type if DEVICE.type == "cuda" else "cpu"
     )
+
+
 
     start_epoch = 0
     best_val_loss = float("inf")
