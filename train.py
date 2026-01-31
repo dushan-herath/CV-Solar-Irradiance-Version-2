@@ -164,10 +164,10 @@ if __name__ == "__main__":
 
 
     sky_encoder = ViTLite(
-        img_size=64,
-        patch_size=8,
+        img_size=224,
+        patch_size=16,
         embed_dim=128,
-        depth=6,
+        depth=2,
         num_heads=8,
         dropout=0.3
     )

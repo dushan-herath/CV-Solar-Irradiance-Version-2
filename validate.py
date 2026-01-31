@@ -116,17 +116,15 @@ if __name__ == "__main__":
         f"horizon={MAX_HORIZON}"
     )
 
-    sky_encoder_base = ViTLite(
-        img_size=112,
-        patch_size=8,
+    sky_encoder = ViTLite(
+        img_size=224,
+        patch_size=16,
         embed_dim=128,
-        depth=6,
+        depth=2,
         num_heads=8,
         dropout=0.3
     )
 
-    sky_encoder = SESIBViTWrapper(sky_encoder_base, patch_size=8) 
-    
     model = MultimodalForecaster(
         sky_encoder=sky_encoder,
         ts_feat_dim=len(full_mean),
