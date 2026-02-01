@@ -32,7 +32,7 @@ def patch_radii(num_patches, device):
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=64, patch_size=8, in_chans=4, embed_dim=128):
         super().__init__()
-        assert patch_size in [4, 8, 16]
+        assert patch_size in [4, 8, 16, 32], "patch_size must be one of [4, 8, 16, 32]"
 
         self.num_patches = (img_size // patch_size) ** 2
 
