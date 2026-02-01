@@ -5,6 +5,8 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 import numpy as np
+import random
+import torchvision.transforms.functional as TF
 
 
 class IrradianceForecastDataset(Dataset):
@@ -28,7 +30,6 @@ class IrradianceForecastDataset(Dataset):
 
         # Split dataset into training and validation sets
         split_idx = int(n * (1 - val_ratio))
-
         if split == "train":
             self.df = df.iloc[:split_idx].reset_index(drop=True)
         elif split == "val":
@@ -44,7 +45,7 @@ class IrradianceForecastDataset(Dataset):
         self.img_size = img_size
         self.time_col = time_col
 
-        # Define input features and prediction targets
+        # Input features and prediction targets
         self.feature_cols = feature_cols or ["ghi", "dni", "dhi"]
         self.target_cols = target_cols or ["ghi"]
 
@@ -72,15 +73,12 @@ class IrradianceForecastDataset(Dataset):
 
         self.df[self.feature_cols] = (self.df[self.feature_cols] - mean) / std
 
-        # Image preprocessing pipeline for sky images
-        self.img_transform = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            ),
-        ])
+        # Image preprocessing: resize + normalize (rotation applied per sequence later)
+        self.img_resize = transforms.Resize((img_size, img_size))
+        self.img_normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225]
+        )
 
         # Log dataset configuration
         print(f"\nDataset initialized ({split.upper()}): {len(self)} samples")
@@ -89,49 +87,76 @@ class IrradianceForecastDataset(Dataset):
               f"Forecast horizon: {horizon}")
 
     def __len__(self):
-        # Total number of valid samples available
         return len(self.df) - self.max_lookback - self.horizon
 
     def __getitem__(self, idx):
-        # Select image window aligned to the end of the time-series window
+        # -------------------------------
+        # Select windows
+        # -------------------------------
         img_window = self.df.iloc[
             idx + self.ts_seq_len - self.img_seq_len : idx + self.ts_seq_len
         ]
-
-        # Select historical time-series window
         ts_window = self.df.iloc[idx : idx + self.ts_seq_len]
-
-        # Select future target window for forecasting
         target_window = self.df.iloc[
             idx + self.ts_seq_len : idx + self.ts_seq_len + self.horizon
         ]
 
-        # Load and preprocess sky image sequence
-        sky_seq = torch.stack([
-            self.img_transform(Image.open(p).convert("RGB"))
-            for p in img_window[self.sky_col].values
-        ])
+        # -------------------------------
+        # Sample one random rotation angle per sequence (training only)
+        # -------------------------------
+        if self.split == "train":
+            angle = random.uniform(-45, 45)  # small rotation in degrees
+        else:
+            angle = 0.0  # no augmentation for validation
 
+        # -------------------------------
+        # Load and preprocess sky image sequence
+        # -------------------------------
+        sky_seq = []
+        for p in img_window[self.sky_col].values:
+            img = Image.open(p).convert("RGB")
+            img = self.img_resize(img)
+
+            # Apply the same rotation to all frames
+            if angle != 0.0:
+                img = TF.rotate(
+                    img,
+                    angle=angle,
+                    interpolation=TF.InterpolationMode.BILINEAR,
+                    fill=0
+                )
+
+            img = TF.to_tensor(img)
+            img = self.img_normalize(img)
+            sky_seq.append(img)
+
+        sky_seq = torch.stack(sky_seq)  # (img_seq_len, 3, H, W)
+
+        # -------------------------------
         # Extract normalized time-series inputs
+        # -------------------------------
         ts_seq = torch.tensor(
             ts_window[self.feature_cols].values,
             dtype=torch.float32
         )
 
+        # -------------------------------
         # Extract normalized target values
+        # -------------------------------
         target_seq = torch.tensor(
             target_window[self.target_cols].values,
             dtype=torch.float32
         )
 
-        # Extract timestamps with second-level precision
+        # -------------------------------
+        # Extract timestamps (optional)
+        # -------------------------------
         ts_time = (
             ts_window[self.time_col]
             .dt.floor("s")
             .astype(str)
             .tolist()
         )
-
         tgt_time = (
             target_window[self.time_col]
             .dt.floor("s")
@@ -139,9 +164,7 @@ class IrradianceForecastDataset(Dataset):
             .tolist()
         )
 
-
         return sky_seq, ts_seq, target_seq, ts_time, tgt_time
-
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
