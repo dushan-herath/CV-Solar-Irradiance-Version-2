@@ -3,55 +3,54 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ==================================================
-# Utility: Resize Positional Embeddings
+# Utility: Radial Map (fisheye geometry)
 # ==================================================
-def resize_pos_embed(pos_embed, new_num_patches):
-    """
-    Dynamically resize positional embeddings if image resolution changes.
-    """
-    _, N, D = pos_embed.shape
-    if N == new_num_patches:
-        return pos_embed
-
-    orig_size = int(N ** 0.5)
-    new_size = int(new_num_patches ** 0.5)
-
-    pos = pos_embed.reshape(1, orig_size, orig_size, D).permute(0, 3, 1, 2)
-    pos = F.interpolate(
-        pos,
-        size=(new_size, new_size),
-        mode="bilinear",
-        align_corners=False
+def radial_map(H, W, device):
+    y, x = torch.meshgrid(
+        torch.linspace(-1, 1, H, device=device),
+        torch.linspace(-1, 1, W, device=device),
+        indexing="ij"
     )
-    pos = pos.permute(0, 2, 3, 1).reshape(1, new_num_patches, D)
-    return pos
+    r = torch.sqrt(x ** 2 + y ** 2)
+    return r
+
+
+def patch_radii(num_patches, device):
+    size = int(num_patches ** 0.5)
+    y, x = torch.meshgrid(
+        torch.linspace(-1, 1, size, device=device),
+        torch.linspace(-1, 1, size, device=device),
+        indexing="ij"
+    )
+    r = torch.sqrt(x ** 2 + y ** 2)
+    return r.flatten()
 
 
 # ==================================================
 # Patch Embedding (Conv Stem)
 # ==================================================
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=64, patch_size=8, in_chans=3, embed_dim=128):
+    def __init__(self, img_size=64, patch_size=8, in_chans=4, embed_dim=128):
         super().__init__()
-        assert patch_size in [4, 8, 16], "Use powers of 2 for conv stem"
+        assert patch_size in [4, 8, 16]
 
         self.num_patches = (img_size // patch_size) ** 2
 
         self.proj = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(in_chans, embed_dim // 2, 3, 2, 1),
             nn.BatchNorm2d(embed_dim // 2),
             nn.GELU(),
 
-            nn.Conv2d(embed_dim // 2, embed_dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(embed_dim // 2, embed_dim // 2, 3, 2, 1),
             nn.BatchNorm2d(embed_dim // 2),
             nn.GELU(),
 
-            nn.Conv2d(embed_dim // 2, embed_dim, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(embed_dim // 2, embed_dim, 3, 2, 1),
         )
 
     def forward(self, x):
-        x = self.proj(x)                 # (B, D, H/P, W/P)
-        x = x.flatten(2).transpose(1, 2) # (B, N, D)
+        x = self.proj(x)
+        x = x.flatten(2).transpose(1, 2)
         return x
 
 
@@ -64,10 +63,7 @@ class TransformerBlock(nn.Module):
 
         self.norm1 = nn.LayerNorm(dim)
         self.attn = nn.MultiheadAttention(
-            dim,
-            num_heads,
-            dropout=dropout,
-            batch_first=True
+            dim, num_heads, dropout=dropout, batch_first=True
         )
 
         self.norm2 = nn.LayerNorm(dim)
@@ -94,14 +90,13 @@ class TransformerBlock(nn.Module):
 
 
 # ==================================================
-# ViT-Lite (Basic Vision Transformer)
+# ViT-Lite (Fisheye-aware, single-frame)
 # ==================================================
 class ViTLite(nn.Module):
     def __init__(
         self,
         img_size=64,
         patch_size=8,
-        in_chans=3,
         embed_dim=128,
         depth=4,
         num_heads=4,
@@ -116,18 +111,9 @@ class ViTLite(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
-            in_chans=in_chans,
+            in_chans=4,          # RGB + radial
             embed_dim=embed_dim
         )
-
-        num_patches = self.patch_embed.num_patches
-
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches, embed_dim)
-        )
-        nn.init.trunc_normal_(self.pos_embed, std=0.02)
-
-        self.pos_drop = nn.Dropout(dropout)
 
         self.blocks = nn.ModuleList([
             TransformerBlock(
@@ -142,31 +128,40 @@ class ViTLite(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        # ----------------------------------------------
-        # 1. Patch embedding
-        # ----------------------------------------------
+        # x: (B, 3, H, W)
+        B, C, H, W = x.shape
+
+        # ------------------------------------------------
+        # Add radial channel → (B, 4, H, W)
+        # ------------------------------------------------
+        r = radial_map(H, W, x.device)
+        r = r.unsqueeze(0).unsqueeze(0).expand(B, 1, H, W)
+        x = torch.cat([x, r], dim=1)
+
+        # ------------------------------------------------
+        # Patch embedding
+        # ------------------------------------------------
         x = self.patch_embed(x)  # (B, N, D)
-        N = x.shape[1]
 
-        # ----------------------------------------------
-        # 2. Positional embedding
-        # ----------------------------------------------
-        pos_embed = resize_pos_embed(self.pos_embed, N).to(x.device)
-        x = x + pos_embed
-        x = self.pos_drop(x)
-
-        # ----------------------------------------------
-        # 3. Transformer encoder
-        # ----------------------------------------------
+        # ------------------------------------------------
+        # Transformer encoder
+        # ------------------------------------------------
         for blk in self.blocks:
             x = blk(x)
 
         x = self.norm(x)
 
-        # ----------------------------------------------
-        # 4. Global average pooling
-        # ----------------------------------------------
-        return x.mean(dim=1)  # (B, D)
+        # ------------------------------------------------
+        # Radial-weighted pooling (sun-aware)
+        # ------------------------------------------------
+        N = x.shape[1]
+        r_p = patch_radii(N, x.device)
+
+        weights = 1.0 / (r_p + 1e-6)
+        weights = weights / weights.sum()
+
+        x = (x * weights.unsqueeze(0).unsqueeze(-1)).sum(dim=1)
+        return x
 
 
 # ==================================================
