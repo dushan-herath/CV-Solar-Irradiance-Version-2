@@ -111,7 +111,7 @@ if __name__ == "__main__":
     BATCH_SIZE = 32
     NUM_EPOCHS = 25
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    IMG_SEQ_LEN = 10
+    IMG_SEQ_LEN = 5
     TS_SEQ_LEN = 30
     HORIZON = 15
     TARGET_DIM = 1
