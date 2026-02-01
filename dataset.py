@@ -105,7 +105,7 @@ class IrradianceForecastDataset(Dataset):
         # Sample one random rotation angle per sequence (training only)
         # -------------------------------
         if self.split == "train":
-            angle = random.uniform(-45, 45)  # small rotation in degrees
+            angle = random.uniform(-180, 180)  # small rotation in degrees
         else:
             angle = 0.0  # no augmentation for validation
 
