@@ -30,7 +30,7 @@ def patch_radii(num_patches, device):
 # Patch Embedding (Conv Stem)
 # ==================================================
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=64, patch_size=8, in_chans=7, embed_dim=128):
+    def __init__(self, img_size=64, patch_size=8, in_chans=4, embed_dim=128):
         super().__init__()
         assert patch_size in [4, 8, 16, 32], "patch_size must be one of [4, 8, 16, 32]"
 
@@ -111,7 +111,7 @@ class ViTLite(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
-            in_chans=7,          # RGB + radial
+            in_chans=4,          # RGB + radial
             embed_dim=embed_dim
         )
 
@@ -168,7 +168,7 @@ class ViTLite(nn.Module):
 # Sanity Test
 # ==================================================
 if __name__ == "__main__":
-    x = torch.randn(2, 6, 64, 64)
+    x = torch.randn(2, 3, 64, 64)
 
     model = ViTLite(
         img_size=64,

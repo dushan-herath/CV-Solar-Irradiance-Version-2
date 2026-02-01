@@ -70,7 +70,7 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     CSV_PATH = "dataset_full_1M.csv"
-    IMG_SEQ_LEN = 5
+    IMG_SEQ_LEN = 10
     TS_SEQ_LEN = 30
     MAX_HORIZON = 15
     TARGET_DIM = 1
@@ -119,7 +119,7 @@ if __name__ == "__main__":
     sky_encoder = ViTLite(
         img_size=224,
         patch_size=32,
-        embed_dim=256,
+        embed_dim=128,
         depth=2,
         num_heads=8,
         dropout=0.3
