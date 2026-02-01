@@ -32,26 +32,42 @@ def patch_radii(num_patches, device):
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=64, patch_size=8, in_chans=4, embed_dim=128):
         super().__init__()
-        assert patch_size in [4, 8, 16, 32], "patch_size must be one of [4, 8, 16, 32]"
+        assert patch_size in [4, 8, 16, 32]
 
+        self.patch_size = patch_size
         self.num_patches = (img_size // patch_size) ** 2
 
-        self.proj = nn.Sequential(
-            nn.Conv2d(in_chans, embed_dim // 2, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim // 2),
-            nn.GELU(),
+        layers = []
+        in_dim = in_chans
+        out_dim = embed_dim // 2
 
-            nn.Conv2d(embed_dim // 2, embed_dim // 2, 3, 2, 1),
-            nn.BatchNorm2d(embed_dim // 2),
-            nn.GELU(),
+        num_down = int(torch.log2(torch.tensor(patch_size)).item())
 
-            nn.Conv2d(embed_dim // 2, embed_dim, 3, 2, 1),
-        )
+        for i in range(num_down):
+            stride = 2
+            layers.append(
+                nn.Conv2d(
+                    in_dim,
+                    out_dim if i < num_down - 1 else embed_dim,
+                    kernel_size=3,
+                    stride=stride,
+                    padding=1
+                )
+            )
+            if i < num_down - 1:
+                layers.append(nn.BatchNorm2d(out_dim))
+                layers.append(nn.GELU())
+                in_dim = out_dim
+            else:
+                in_dim = embed_dim
+
+        self.proj = nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.proj(x)
-        x = x.flatten(2).transpose(1, 2)
+        x = self.proj(x)                 # (B, D, H/P, W/P)
+        x = x.flatten(2).transpose(1, 2) # (B, N, D)
         return x
+
 
 
 # ==================================================
