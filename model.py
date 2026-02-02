@@ -77,19 +77,19 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, : x.size(1)]
 
 # ----------------------
-# Gated fusion
+# Weighted Gated Fusion (Option 1)
 # ----------------------
-class GatedFusion(nn.Module):
+class WeightedGatedFusion(nn.Module):
     def __init__(self, img_dim, ts_dim, out_dim):
         super().__init__()
 
         self.img_proj = nn.Linear(img_dim, ts_dim)
 
-        self.gate = nn.Sequential(
+        self.weight_net = nn.Sequential(
             nn.Linear(ts_dim * 2, ts_dim),
             nn.GELU(),
             nn.Linear(ts_dim, ts_dim),
-            nn.Sigmoid(),
+            nn.Sigmoid(),   # α ∈ [0,1]
         )
 
         self.proj = nn.Sequential(
@@ -100,8 +100,10 @@ class GatedFusion(nn.Module):
 
     def forward(self, ts, img):
         img = self.img_proj(img)
-        gate = self.gate(torch.cat([ts, img], dim=-1))
-        fused = ts + gate * img
+
+        alpha = self.weight_net(torch.cat([ts, img], dim=-1))  # shape: (B, T, ts_dim)
+
+        fused = alpha * ts + (1.0 - alpha) * img
         return self.proj(fused)
 
 # ----------------------
@@ -140,7 +142,7 @@ class MultimodalForecaster(nn.Module):
         self.sky_encoder = sky_encoder
         self.ts_encoder = TS_Encoder(ts_feat_dim, ts_embed_dim)
 
-        self.fusion = GatedFusion(
+        self.fusion = WeightedGatedFusion(
             img_dim=sky_encoder.out_dim,
             ts_dim=ts_embed_dim,
             out_dim=fused_dim,
@@ -177,7 +179,7 @@ class MultimodalForecaster(nn.Module):
         # Align TS with image frames
         ts_img = ts[:, -T_img:]
 
-        # Gated fusion
+        # Weighted gated fusion
         fused = self.fusion(ts_img, sky)
 
         # Temporal modeling
