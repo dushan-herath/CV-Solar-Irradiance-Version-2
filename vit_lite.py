@@ -3,16 +3,23 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ==================================================
-# Utility: Radial Map (fisheye geometry)
+# Utility: Fisheye Geometry Map (radius + hemisphere height)
 # ==================================================
-def radial_map(H, W, device):
+def fisheye_map(H, W, device):
+    """
+    Returns a 2-channel fisheye map:
+    - Channel 0: radial distance r (0=center, 1=edge)
+    - Channel 1: height z of hemisphere (0=edge, 1=center)
+    """
     y, x = torch.meshgrid(
         torch.linspace(-1, 1, H, device=device),
         torch.linspace(-1, 1, W, device=device),
         indexing="ij"
     )
-    r = torch.sqrt(x ** 2 + y ** 2)
-    return r
+
+    r = torch.sqrt(x**2 + y**2)
+    z = torch.sqrt(torch.clamp(1.0 - r**2, min=0.0))  # hemisphere height
+    return torch.stack([r, z], dim=0)  # (2, H, W)
 
 
 def patch_radii(num_patches, device):
@@ -30,7 +37,7 @@ def patch_radii(num_patches, device):
 # Patch Embedding (Conv Stem)
 # ==================================================
 class PatchEmbed(nn.Module):
-    def __init__(self, img_size=64, patch_size=8, in_chans=4, embed_dim=128):
+    def __init__(self, img_size=64, patch_size=8, in_chans=5, embed_dim=128):
         super().__init__()
         assert patch_size in [4, 8, 16, 32], "patch_size must be one of [4, 8, 16, 32]"
 
@@ -51,7 +58,7 @@ class PatchEmbed(nn.Module):
     def forward(self, x):
         x = self.proj(x)
         x = x.flatten(2).transpose(1, 2)
-        return x
+        return x  # (B, N, D)
 
 
 # ==================================================
@@ -90,7 +97,7 @@ class TransformerBlock(nn.Module):
 
 
 # ==================================================
-# ViT-Lite (Fisheye-aware, single-frame)
+# ViT-Lite (Fisheye-aware, RGB + geometry)
 # ==================================================
 class ViTLite(nn.Module):
     def __init__(
@@ -111,7 +118,7 @@ class ViTLite(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
-            in_chans=4,          # RGB + radial
+            in_chans=5,          # RGB + r + z
             embed_dim=embed_dim
         )
 
@@ -132,11 +139,11 @@ class ViTLite(nn.Module):
         B, C, H, W = x.shape
 
         # ------------------------------------------------
-        # Add radial channel → (B, 4, H, W)
+        # Add fisheye geometry → (B, 5, H, W)
         # ------------------------------------------------
-        r = radial_map(H, W, x.device)
-        r = r.unsqueeze(0).unsqueeze(0).expand(B, 1, H, W)
-        x = torch.cat([x, r], dim=1)
+        geo = fisheye_map(H, W, x.device)      # (2, H, W)
+        geo = geo.unsqueeze(0).expand(B, -1, H, W)
+        x = torch.cat([x, geo], dim=1)         # (B, 5, H, W)
 
         # ------------------------------------------------
         # Patch embedding
@@ -152,23 +159,19 @@ class ViTLite(nn.Module):
         x = self.norm(x)
 
         # ------------------------------------------------
-        # Radial-weighted pooling (sun-aware)
+        # Pooling (mean over patches)
         # ------------------------------------------------
-        N = x.shape[1]
-        r_p = patch_radii(N, x.device)
+        x = x.mean(dim=1)  # (B, D)
 
-        weights = 1.0 / (r_p + 1e-6)
-        weights = weights / weights.sum()
-
-        x = (x * weights.unsqueeze(0).unsqueeze(-1)).sum(dim=1)
         return x
+
 
 
 # ==================================================
 # Sanity Test
 # ==================================================
 if __name__ == "__main__":
-    x = torch.randn(2, 3, 64, 64)
+    x = torch.randn(2, 3, 64, 64)  # Batch of RGB images
 
     model = ViTLite(
         img_size=64,
@@ -179,6 +182,5 @@ if __name__ == "__main__":
     )
 
     y = model(x)
-
     print("Output shape:", y.shape)  # (2, 128)
     print("out_dim:", model.out_dim)
