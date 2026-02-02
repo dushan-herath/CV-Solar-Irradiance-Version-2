@@ -108,17 +108,21 @@ class ViTLite(nn.Module):
         depth=4,
         num_heads=4,
         mlp_ratio=2.0,
-        dropout=0.2
+        dropout=0.2,
+        use_geometry=False  # <-- toggle r,z channels
     ):
         super().__init__()
 
         self.embed_dim = embed_dim
         self.out_dim = embed_dim
+        self.use_geometry = use_geometry
+
+        in_chans = 3 + 2 if use_geometry else 3  # RGB + optional r,z
 
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
-            in_chans=5,          # RGB + r + z
+            in_chans=in_chans,
             embed_dim=embed_dim
         )
 
@@ -139,11 +143,12 @@ class ViTLite(nn.Module):
         B, C, H, W = x.shape
 
         # ------------------------------------------------
-        # Add fisheye geometry → (B, 5, H, W)
+        # Optionally add fisheye geometry
         # ------------------------------------------------
-        geo = fisheye_map(H, W, x.device)      # (2, H, W)
-        geo = geo.unsqueeze(0).expand(B, -1, H, W)
-        x = torch.cat([x, geo], dim=1)         # (B, 5, H, W)
+        if self.use_geometry:
+            geo = fisheye_map(H, W, x.device)      # (2, H, W)
+            geo = geo.unsqueeze(0).expand(B, -1, H, W)
+            x = torch.cat([x, geo], dim=1)         # (B, 5, H, W)
 
         # ------------------------------------------------
         # Patch embedding
@@ -164,6 +169,7 @@ class ViTLite(nn.Module):
         x = x.mean(dim=1)  # (B, D)
 
         return x
+
 
 
 
