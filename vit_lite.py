@@ -109,7 +109,7 @@ class ViTLite(nn.Module):
         num_heads=4,
         mlp_ratio=2.0,
         dropout=0.2,
-        use_geometry=False  # <-- toggle r,z channels
+        use_geometry=True  # <-- toggle r,z channels
     ):
         super().__init__()
 
