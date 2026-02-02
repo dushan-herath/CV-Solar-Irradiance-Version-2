@@ -198,7 +198,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(
         [
             {"params": model.sky_encoder.parameters(), "lr": 1e-4},
-            {"params": model.ts_encoder.parameters(), "lr": 5e-5},
+            {"params": model.ts_encoder.parameters(), "lr": 5e-7},
             {"params": model.cross_fusion.parameters(), "lr": 5e-5},
             {"params": model.temporal_tf.parameters(), "lr": 5e-5},
             {"params": model.head.parameters(), "lr": 1e-4},

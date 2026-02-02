@@ -32,32 +32,24 @@ def patch_radii(num_patches, device):
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=64, patch_size=8, in_chans=4, embed_dim=128):
         super().__init__()
-        assert patch_size in [4, 8, 16, 32]
+        assert patch_size in [4, 8, 16, 32], "patch_size must be one of [4, 8, 16, 32]"
 
         self.num_patches = (img_size // patch_size) ** 2
 
-        self.stem = nn.Sequential(
+        self.proj = nn.Sequential(
             nn.Conv2d(in_chans, embed_dim // 2, 3, 2, 1),
             nn.BatchNorm2d(embed_dim // 2),
             nn.GELU(),
-        )
 
-        self.multi_scale = nn.ModuleList([
             nn.Conv2d(embed_dim // 2, embed_dim // 2, 3, 2, 1),
-            nn.Conv2d(embed_dim // 2, embed_dim // 2, 5, 2, 2),
-        ])
-
-        self.fuse = nn.Sequential(
-            nn.BatchNorm2d(embed_dim),
+            nn.BatchNorm2d(embed_dim // 2),
             nn.GELU(),
-            nn.Conv2d(embed_dim, embed_dim, 3, 2, 1),
+
+            nn.Conv2d(embed_dim // 2, embed_dim, 3, 2, 1),
         )
 
     def forward(self, x):
-        x = self.stem(x)
-        feats = [conv(x) for conv in self.multi_scale]
-        x = torch.cat(feats, dim=1)
-        x = self.fuse(x)
+        x = self.proj(x)
         x = x.flatten(2).transpose(1, 2)
         return x
 
